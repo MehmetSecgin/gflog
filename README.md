@@ -18,6 +18,21 @@ cargo install --git https://github.com/MehmetSecgin/gflog
 Or from a local clone: `cargo install --path .`. Either way `gflog` lands on `~/.cargo/bin`;
 verify with `gflog --version`.
 
+### Download a prebuilt binary (macOS, Apple Silicon)
+
+No Rust needed. Grab the latest `*-aarch64-apple-darwin.tar.gz` from the
+[Releases page](https://github.com/MehmetSecgin/gflog/releases/latest), then:
+
+```
+tar -xzf gflog-*-aarch64-apple-darwin.tar.gz
+xattr -dr com.apple.quarantine gflog        # clear macOS Gatekeeper quarantine
+sudo mv gflog /usr/local/bin/                # or anywhere on your PATH
+gflog --version
+```
+
+The binary is unsigned, so macOS quarantines it on download — the `xattr` line clears that.
+(Building from source via `cargo` above avoids quarantine entirely.)
+
 ## Point it at your Grafana
 
 The binary has no built-in host. Set it once:
