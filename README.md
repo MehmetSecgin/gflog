@@ -1,0 +1,71 @@
+# gflog
+
+[![CI](https://github.com/MehmetSecgin/gflog/actions/workflows/ci.yml/badge.svg)](https://github.com/MehmetSecgin/gflog/actions/workflows/ci.yml)
+
+A small CLI for reading Grafana/Loki logs from the terminal — both **downloaded JSON
+exports** and **live LogQL queries** — without drowning in raw log lines. It normalizes
+records to `ts, level, service, pod, namespace, logger, thread, trace, msg, stack` and gives
+you compact, composable views: summaries, error lists, pattern clustering, timelines, traces.
+
+## Install
+
+One line (needs a Rust toolchain — get one at https://rustup.rs):
+
+```
+cargo install --git https://github.com/MehmetSecgin/gflog
+```
+
+Or from a local clone: `cargo install --path .`. Either way `gflog` lands on `~/.cargo/bin`;
+verify with `gflog --version`.
+
+## Point it at your Grafana
+
+The binary has no built-in host. Set it once:
+
+```
+gflog url https://grafana.example.com     # saved to ~/.config/grafana-logs/url
+```
+
+or export `GRAFANA_URL` (takes precedence). `gflog url` prints the current value.
+
+## Authenticate
+
+A **service-account Bearer token** (preferred) or a **session cookie**:
+
+```
+gflog token            # read a token from the clipboard, save, and test
+gflog cookie           # read a grafana_session cookie from the clipboard
+gflog token --test     # check the current credential
+```
+
+Resolution order: `$GRAFANA_TOKEN` → `~/.config/grafana-logs/token` → cookie file. A token is
+decoupled from your browser session; a shared cookie is kept alive by rotation (toggle with
+`--no-rotate`).
+
+## Use
+
+```
+# offline: newest export in ~/Downloads (or -f PATH/glob/-)
+gflog file summary
+gflog file -f Logs-2026-01-01.json errors --warn
+
+# live LogQL
+gflog live -q '{service_name="my-service"} |= "error"' --since 30m summary
+gflog metric -q 'sum by (level)(count_over_time({service_name="my-service"} | logfmt [5m]))' --since 3h
+gflog values service_name            # discover what exists
+gflog labels
+```
+
+### Views (shared by `file` and `live`)
+`summary` · `errors [--warn|--level A,B]` · `grep PATTERN [-i]` · `trace TRACE_ID` ·
+`show INDEX` · `patterns [--level A,B]` · `timeline [--buckets N]`. Add `--json` to any
+command for machine-readable output.
+
+### Scoping
+- `--datasource SUBSTR` — pick a Loki datasource when several exist (cached after first use).
+- `--namespace`/`--ns a,b` — inject `namespace=~"a|b"` into the stream selector (repeatable or
+  comma-separated). An explicit `namespace=...` in your `-q` always wins.
+- `--since 30m` / `--start` / `--end`, `--limit N`, record filters `--service`/`--logger`/
+  `--match`/`--after`/`--before`.
+
+Only JSON exports are handled offline; `.txt`/`.csv` are out of scope.

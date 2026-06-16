@@ -1,0 +1,28 @@
+[package]
+name = "gflog"
+version = "0.3.0"
+edition = "2024"
+description = "Parse Grafana/Loki logs — offline JSON exports and live LogQL queries"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/MehmetSecgin/gflog"
+keywords = ["grafana", "loki", "logs", "logql", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "gflog"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+chrono = "0.4"
+glob = "0.3"
+dirs = "5"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+
+[profile.release]
+strip = true
+lto = true
