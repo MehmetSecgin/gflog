@@ -33,6 +33,26 @@ gflog --version
 The binary is unsigned, so macOS quarantines it on download — the `xattr` line clears that.
 (Building from source via `cargo` above avoids quarantine entirely.)
 
+### Install script (macOS, Apple Silicon)
+
+Interactive — it prints exactly what it will do (download URL, checksum, install path,
+sudo, quarantine clear) and waits for your confirmation before changing anything:
+
+```
+curl -fsSL https://raw.githubusercontent.com/MehmetSecgin/gflog/main/install.sh | sh
+```
+
+As with any `curl | sh`, you're welcome to read it first:
+
+```
+curl -fsSL https://raw.githubusercontent.com/MehmetSecgin/gflog/main/install.sh -o install.sh
+less install.sh && sh install.sh
+```
+
+It verifies the sha256 and refuses to install if the checksum is missing or wrong.
+Overrides: `GFLOG_INSTALL_DIR=~/.local/bin`, `GFLOG_VERSION=v0.3.0`, `GFLOG_YES=1` (skip the
+prompt for automation).
+
 ## Point it at your Grafana
 
 The binary has no built-in host. Set it once:
