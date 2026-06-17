@@ -2,24 +2,51 @@ name: Release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  macos-arm64:
-    name: build · package · release (macOS arm64)
+  release:
+    name: version · build · package · release (macOS arm64)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - name: resolve next version
+        id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_ver=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          latest_tag=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+          tag_ver="${latest_tag#v}"; [ -z "$latest_tag" ] && tag_ver="0.0.0"
+          higher=$(printf '%s\n%s\n' "$cargo_ver" "$tag_ver" | sort -V | tail -n1)
+          if [ "$cargo_ver" != "$tag_ver" ] && [ "$higher" = "$cargo_ver" ] && ! git rev-parse "v$cargo_ver" >/dev/null 2>&1; then
+            next="$cargo_ver"            # honor a manual bump in Cargo.toml (e.g. a major)
+          else
+            IFS=. read -r MA MI PA <<<"$higher"
+            next="$MA.$((MI + 1)).0"     # otherwise auto-bump minor
+          fi
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+          echo "releasing v$next (cargo=$cargo_ver, latest_tag=${latest_tag:-none})"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - name: stamp version
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i '' -E "0,/^version = \"[^\"]+\"/s//version = \"${{ steps.v.outputs.next }}\"/" Cargo.toml
+          cargo update -p gflog --precise "${{ steps.v.outputs.next }}"
       - name: build
-        run: cargo build --release
+        run: cargo build --release --locked
       - name: package
         run: |
-          asset="gflog-${GITHUB_REF_NAME}-aarch64-apple-darwin.tar.gz"
+          asset="gflog-${{ steps.v.outputs.tag }}-aarch64-apple-darwin.tar.gz"
           tar -czf "$asset" -C target/release gflog
           shasum -a 256 "$asset" | tee "$asset.sha256"
           echo "ASSET=$asset" >> "$GITHUB_ENV"
@@ -27,7 +54,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "${{ steps.v.outputs.tag }}" \
             "$ASSET" "$ASSET.sha256" \
-            --title "$GITHUB_REF_NAME" \
+            --target "$GITHUB_SHA" \
+            --title "${{ steps.v.outputs.tag }}" \
             --generate-notes

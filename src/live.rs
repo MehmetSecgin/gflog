@@ -1,9 +1,9 @@
 use crate::cli::{Conn, Filter, Ns, TimeRange, View};
 use crate::record::normalize;
 use chrono::{NaiveDateTime, TimeZone, Utc};
+use reqwest::StatusCode;
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::header::SET_COOKIE;
-use reqwest::StatusCode;
 use serde_json::{Map, Value};
 use std::fs;
 use std::io::Read;
@@ -18,9 +18,17 @@ fn base() -> String {
     let raw = std::env::var("GRAFANA_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| fs::read_to_string(url_file()).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+        .or_else(|| {
+            fs::read_to_string(url_file())
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
     match raw {
-        Some(u) => u.trim_end_matches('/').to_string(),
+        Some(u) => match normalize_url(&u) {
+            Ok(v) => v,
+            Err(e) => crate::die(&format!("invalid Grafana URL ({}): {e}", u.trim())),
+        },
         None => crate::die(&format!(
             "no Grafana URL set. Set one:\n  gflog url https://grafana.example.com\nor export GRAFANA_URL (checked $GRAFANA_URL and {})",
             url_file().display()
@@ -28,8 +36,39 @@ fn base() -> String {
     }
 }
 
+fn is_local_host(host: &str) -> bool {
+    let bare = host.split(':').next().unwrap_or("");
+    matches!(bare, "localhost" | "127.0.0.1" | "::1") || bare.ends_with(".localhost")
+}
+
+fn normalize_url(raw: &str) -> Result<String, String> {
+    let u = raw.trim().trim_end_matches('/');
+    if u.is_empty() {
+        return Err("empty URL".into());
+    }
+    let host = if let Some(h) = u.strip_prefix("https://") {
+        h.split('/').next().unwrap_or("")
+    } else if let Some(h) = u.strip_prefix("http://") {
+        let host = h.split('/').next().unwrap_or("");
+        if is_local_host(host) {
+            return Ok(u.to_string());
+        }
+        return Err(format!(
+            "refusing http:// for non-local host {host:?} — your token/cookie would be sent in cleartext. Use https://"
+        ));
+    } else {
+        return Err(format!("URL must start with https:// (got {u:?})"));
+    };
+    if host.is_empty() {
+        return Err("URL has no host".into());
+    }
+    Ok(u.to_string())
+}
+
 fn cfg_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".config/grafana-logs")
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".config/grafana-logs")
 }
 fn url_file() -> PathBuf {
     cfg_dir().join("url")
@@ -51,7 +90,10 @@ fn token_value() -> Option<String> {
             return Some(t.to_string());
         }
     }
-    fs::read_to_string(token_file()).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    fs::read_to_string(token_file())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 enum Auth {
@@ -74,6 +116,13 @@ fn resolve_auth() -> Auth {
     }
 }
 
+fn clip(s: &str, n: usize) -> &str {
+    match s.char_indices().nth(n) {
+        Some((i, _)) => &s[..i],
+        None => s,
+    }
+}
+
 fn unit_secs(u: char) -> Option<i64> {
     match u {
         's' => Some(1),
@@ -86,7 +135,9 @@ fn unit_secs(u: char) -> Option<i64> {
 }
 
 fn read_cookie_raw() -> Option<String> {
-    fs::read_to_string(cookie_file()).ok().map(|s| s.trim().to_string())
+    fs::read_to_string(cookie_file())
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 fn cookie_header() -> String {
@@ -112,7 +163,8 @@ fn with_headers(rb: RequestBuilder) -> RequestBuilder {
         Auth::Bearer(t) => rb.header("Authorization", format!("Bearer {t}")),
         Auth::Cookie(c) => rb.header("Cookie", c),
     };
-    rb.header("Accept", "application/json").header("User-Agent", UA)
+    rb.header("Accept", "application/json")
+        .header("User-Agent", UA)
 }
 
 fn save_rotated(set_cookies: &[String]) {
@@ -124,7 +176,9 @@ fn save_rotated(set_cookies: &[String]) {
         if tok.is_empty() || tok == "deleted" {
             continue;
         }
-        let cur = read_cookie_raw().map(|r| r.rsplit('=').next().unwrap_or("").to_string()).unwrap_or_default();
+        let cur = read_cookie_raw()
+            .map(|r| r.rsplit('=').next().unwrap_or("").to_string())
+            .unwrap_or_default();
         if tok != cur {
             let _ = fs::create_dir_all(cfg_dir());
             if fs::write(cookie_file(), tok).is_ok() {
@@ -169,9 +223,17 @@ fn api(path: &str, params: &[(&str, &str)]) -> Value {
         } else {
             "session expired — refresh it:\n  gflog cookie"
         };
-        crate::die(&format!("auth failed ({}). {fix}\n{}", status.as_u16(), &body[..body.len().min(300)]));
+        crate::die(&format!(
+            "auth failed ({}). {fix}\n{}",
+            status.as_u16(),
+            clip(&body, 300)
+        ));
     }
-    crate::die(&format!("HTTP {} from {path}\n{}", status.as_u16(), &body[..body.len().min(300)]));
+    crate::die(&format!(
+        "HTTP {} from {path}\n{}",
+        status.as_u16(),
+        clip(&body, 300)
+    ));
 }
 
 pub fn rotate(verbose: bool) -> bool {
@@ -184,7 +246,12 @@ pub fn rotate(verbose: bool) -> bool {
     if read_cookie_raw().is_none() {
         return false;
     }
-    let before = read_cookie_raw().unwrap_or_default().rsplit('=').next().unwrap_or("").to_string();
+    let before = read_cookie_raw()
+        .unwrap_or_default()
+        .rsplit('=')
+        .next()
+        .unwrap_or("")
+        .to_string();
     let url = format!("{}/api/user/auth-tokens/rotate", base());
     let rb = client()
         .post(&url)
@@ -199,17 +266,32 @@ pub fn rotate(verbose: bool) -> bool {
     };
     if !resp.status().is_success() {
         if verbose {
-            println!("rotate failed ({}) — session likely fully expired, re-copy the cookie", resp.status().as_u16());
+            println!(
+                "rotate failed ({}) — session likely fully expired, re-copy the cookie",
+                resp.status().as_u16()
+            );
         }
         return false;
     }
     let cookies = collect_set_cookies(&resp);
     let _ = resp.text();
     save_rotated(&cookies);
-    let after = read_cookie_raw().unwrap_or_default().rsplit('=').next().unwrap_or("").to_string();
+    let after = read_cookie_raw()
+        .unwrap_or_default()
+        .rsplit('=')
+        .next()
+        .unwrap_or("")
+        .to_string();
     if verbose {
         if after != before {
-            let tail: String = after.chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
+            let tail: String = after
+                .chars()
+                .rev()
+                .take(6)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
             println!("session refreshed (new token …{tail})");
         } else {
             println!("session refreshed (unchanged)");
@@ -231,11 +313,22 @@ fn sanitize_cookie(raw: &str) -> String {
 }
 
 fn read_clipboard() -> String {
-    Command::new("pbpaste")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default()
+    let tools: &[(&str, &[&str])] = &[
+        ("pbpaste", &[]),
+        ("wl-paste", &["--no-newline"]),
+        ("xclip", &["-selection", "clipboard", "-o"]),
+        ("xsel", &["-b"]),
+    ];
+    for (bin, args) in tools {
+        if let Ok(o) = Command::new(bin).args(*args).output()
+            && o.status.success()
+            && let Ok(s) = String::from_utf8(o.stdout)
+            && !s.trim().is_empty()
+        {
+            return s;
+        }
+    }
+    String::new()
 }
 
 fn report_auth() -> bool {
@@ -247,24 +340,38 @@ fn report_auth() -> bool {
     let status = resp.status();
     let cookies = collect_set_cookies(&resp);
     let body = resp.text().unwrap_or_default();
-    let mode = if token_value().is_some() { "Bearer token" } else { "session cookie" };
+    let mode = if token_value().is_some() {
+        "Bearer token"
+    } else {
+        "session cookie"
+    };
     if status.is_success() {
         save_rotated(&cookies);
         let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
         let names: Vec<String> = loki_list(&v).iter().map(|(_, n)| n.clone()).collect();
-        let joined = if names.is_empty() { "(none with a URL)".to_string() } else { names.join(", ") };
-        println!("auth OK via {mode} — {} usable Loki datasource(s): {joined}", names.len());
+        let joined = if names.is_empty() {
+            "(none with a URL)".to_string()
+        } else {
+            names.join(", ")
+        };
+        println!(
+            "auth OK via {mode} — {} usable Loki datasource(s): {joined}",
+            names.len()
+        );
         true
     } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
         let fix = if token_value().is_some() {
             "token rejected/expired — set a fresh one with `gflog token`.".to_string()
         } else {
-            format!("cookie expired/rotated. Copy a fresh grafana_session from the browser ({}) and run `cookie` again.", base())
+            format!(
+                "cookie expired/rotated. Copy a fresh grafana_session from the browser ({}) and run `cookie` again.",
+                base()
+            )
         };
         println!("auth FAILED ({}) via {mode} — {fix}", status.as_u16());
         false
     } else {
-        println!("unexpected HTTP {}: {}", status.as_u16(), &body[..body.len().min(300)]);
+        println!("unexpected HTTP {}: {}", status.as_u16(), clip(&body, 300));
         false
     }
 }
@@ -275,7 +382,10 @@ fn loki_list(v: &Value) -> Vec<(i64, String)> {
             a.iter()
                 .filter(|d| {
                     d.get("type").and_then(Value::as_str) == Some("loki")
-                        && d.get("url").and_then(Value::as_str).map(|u| !u.is_empty()).unwrap_or(false)
+                        && d.get("url")
+                            .and_then(Value::as_str)
+                            .map(|u| !u.is_empty())
+                            .unwrap_or(false)
                 })
                 .filter_map(|d| {
                     Some((d.get("id")?.as_i64()?, d.get("name")?.as_str()?.to_string()))
@@ -311,22 +421,42 @@ pub fn cmd_cookie(value: Option<String>, stdin: bool, test: bool) {
         crate::die(&format!("cannot write {}: {e}", cookie_file().display()));
     }
     set_600(&cookie_file());
-    let tail: String = tok.chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
-    println!("wrote {} from {src} (token …{tail}, {} chars)", cookie_file().display(), tok.chars().count());
+    let tail: String = tok
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    println!(
+        "wrote {} from {src} (token …{tail}, {} chars)",
+        cookie_file().display(),
+        tok.chars().count()
+    );
     report_auth();
 }
 
 fn sanitize_token(raw: &str) -> String {
     let raw = raw.replace('\u{feff}', "");
     let raw = raw.trim().trim_matches(|c| c == '\'' || c == '"').trim();
-    raw.strip_prefix("Bearer ").or_else(|| raw.strip_prefix("bearer ")).unwrap_or(raw).trim().to_string()
+    raw.strip_prefix("Bearer ")
+        .or_else(|| raw.strip_prefix("bearer "))
+        .unwrap_or(raw)
+        .trim()
+        .to_string()
 }
 
 pub fn cmd_token(value: Option<String>, stdin: bool, test: bool, clear: bool) {
     if clear {
         match fs::remove_file(token_file()) {
-            Ok(_) => println!("removed {} — reverted to cookie auth", token_file().display()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("no token file to remove"),
+            Ok(_) => println!(
+                "removed {} — reverted to cookie auth",
+                token_file().display()
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                println!("no token file to remove")
+            }
             Err(e) => crate::die(&format!("cannot remove {}: {e}", token_file().display())),
         }
         return;
@@ -356,20 +486,31 @@ pub fn cmd_token(value: Option<String>, stdin: bool, test: bool, clear: bool) {
         crate::die(&format!("cannot write {}: {e}", token_file().display()));
     }
     set_600(&token_file());
-    let tail: String = tok.chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
-    println!("wrote {} from {src} (token …{tail}, {} chars)", token_file().display(), tok.chars().count());
+    let tail: String = tok
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    println!(
+        "wrote {} from {src} (token …{tail}, {} chars)",
+        token_file().display(),
+        tok.chars().count()
+    );
     report_auth();
 }
 
 pub fn cmd_url(value: Option<String>) {
     match value {
         Some(v) => {
-            let v = v.trim().trim_end_matches('/');
-            if v.is_empty() {
-                crate::die("empty URL — pass e.g. https://grafana.example.com");
-            }
+            let v = match normalize_url(&v) {
+                Ok(v) => v,
+                Err(e) => crate::die(&format!("rejected URL: {e}")),
+            };
             let _ = fs::create_dir_all(cfg_dir());
-            if let Err(e) = fs::write(url_file(), v) {
+            if let Err(e) = fs::write(url_file(), &v) {
                 crate::die(&format!("cannot write {}: {e}", url_file().display()));
             }
             set_600(&url_file());
@@ -383,27 +524,33 @@ pub fn cmd_url(value: Option<String>) {
 }
 
 fn loki_datasource(want: Option<&str>, refresh: bool) -> (i64, String) {
-    if !refresh && want.is_none() {
-        if let Ok(t) = fs::read_to_string(ds_cache()) {
-            if let Ok(v) = serde_json::from_str::<Value>(&t) {
-                if let (Some(id), Some(name)) =
-                    (v.get("id").and_then(Value::as_i64), v.get("name").and_then(Value::as_str))
-                {
-                    return (id, name.to_string());
-                }
-            }
-        }
+    if !refresh
+        && want.is_none()
+        && let Ok(t) = fs::read_to_string(ds_cache())
+        && let Ok(v) = serde_json::from_str::<Value>(&t)
+        && let (Some(id), Some(name)) = (
+            v.get("id").and_then(Value::as_i64),
+            v.get("name").and_then(Value::as_str),
+        )
+    {
+        return (id, name.to_string());
     }
     let ds = loki_list(&api("/api/datasources", &[]));
     if ds.is_empty() {
         crate::die("no usable Loki datasource found in this Grafana");
     }
     let chosen = if let Some(w) = want {
-        match ds.iter().find(|(_, n)| n.to_lowercase().contains(&w.to_lowercase())) {
+        match ds
+            .iter()
+            .find(|(_, n)| n.to_lowercase().contains(&w.to_lowercase()))
+        {
             Some(c) => c.clone(),
             None => {
                 let avail: Vec<String> = ds.iter().map(|(_, n)| n.clone()).collect();
-                crate::die(&format!("no Loki datasource matching {w:?}. available: {}", avail.join(", ")));
+                crate::die(&format!(
+                    "no Loki datasource matching {w:?}. available: {}",
+                    avail.join(", ")
+                ));
             }
         }
     } else {
@@ -416,7 +563,9 @@ fn loki_datasource(want: Option<&str>, refresh: bool) -> (i64, String) {
 }
 
 fn now_ns() -> i64 {
-    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     d.as_nanos() as i64
 }
 
@@ -427,10 +576,10 @@ fn to_ns(s: &str, now: i64) -> i64 {
     }
     let last = s.chars().last().unwrap();
     let head = &s[..s.len() - last.len_utf8()];
-    if let Some(secs) = unit_secs(last) {
-        if let Ok(n) = head.trim_start_matches('-').parse::<i64>() {
-            return now - n * secs * 1_000_000_000;
-        }
+    if let Some(secs) = unit_secs(last)
+        && let Ok(n) = head.trim_start_matches('-').parse::<i64>()
+    {
+        return now - n * secs * 1_000_000_000;
     }
     if s.chars().all(|c| c.is_ascii_digit()) {
         let n: i64 = s.parse().unwrap_or(0);
@@ -489,10 +638,26 @@ fn selector_has_namespace(query: &str) -> bool {
         (Some(a), Some(b)) if b > a => &query[a + 1..b],
         _ => return false,
     };
-    regex::Regex::new(r#"namespace\s*(=~|!~|!=|=)"#).unwrap().is_match(inner)
+    regex::Regex::new(r#"namespace\s*(=~|!~|!=|=)"#)
+        .unwrap()
+        .is_match(inner)
+}
+
+fn ns_ok(ns: &str) -> bool {
+    !ns.is_empty()
+        && ns
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '*' | '-'))
 }
 
 fn ns_matcher(nss: &[String]) -> String {
+    for ns in nss {
+        if !ns_ok(ns) {
+            crate::die(&format!(
+                "invalid --namespace {ns:?}: only [A-Za-z0-9._*-] allowed. For a custom matcher, put it in -q directly."
+            ));
+        }
+    }
     format!("namespace=~\"{}\"", nss.join("|"))
 }
 
@@ -513,7 +678,9 @@ fn inject_ns(query: &str, matcher: &str) -> String {
 fn resolve_ns(query: &str, ns: &Ns) -> Option<Vec<String>> {
     if selector_has_namespace(query) {
         if !ns.namespace.is_empty() {
-            eprintln!("note: -q already sets a namespace matcher — keeping it, ignoring --namespace");
+            eprintln!(
+                "note: -q already sets a namespace matcher — keeping it, ignoring --namespace"
+            );
         }
         return None;
     }
@@ -535,7 +702,16 @@ fn apply_ns_opt(query: Option<&str>, ns: &Ns) -> Option<String> {
     }
 }
 
-pub fn run_live(query: &str, ns: &Ns, limit: usize, json: bool, time: &TimeRange, conn: &Conn, filter: &Filter, view: &View) {
+pub fn run_live(
+    query: &str,
+    ns: &Ns,
+    limit: usize,
+    json: bool,
+    time: &TimeRange,
+    conn: &Conn,
+    filter: &Filter,
+    view: &View,
+) {
     let (id, name) = prep(conn);
     let query = apply_ns(query, ns);
     let query = query.as_str();
@@ -553,13 +729,24 @@ pub fn run_live(query: &str, ns: &Ns, limit: usize, json: bool, time: &TimeRange
     );
     let empty = Map::new();
     let mut recs = Vec::new();
-    if let Some(streams) = data.get("data").and_then(|d| d.get("result")).and_then(Value::as_array) {
+    if let Some(streams) = data
+        .get("data")
+        .and_then(|d| d.get("result"))
+        .and_then(Value::as_array)
+    {
         for stream in streams {
-            let labels = stream.get("stream").and_then(Value::as_object).unwrap_or(&empty);
+            let labels = stream
+                .get("stream")
+                .and_then(Value::as_object)
+                .unwrap_or(&empty);
             if let Some(values) = stream.get("values").and_then(Value::as_array) {
                 for pair in values {
                     let Some(arr) = pair.as_array() else { continue };
-                    let ts_ns: i64 = arr.first().and_then(Value::as_str).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let ts_ns: i64 = arr
+                        .first()
+                        .and_then(Value::as_str)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
                     let line = arr.get(1).and_then(Value::as_str).unwrap_or("");
                     recs.push(normalize(line, &iso_from_ns(ts_ns), labels));
                 }
@@ -572,7 +759,10 @@ pub fn run_live(query: &str, ns: &Ns, limit: usize, json: bool, time: &TimeRange
     if recs.len() == total {
         eprintln!("# loki[{name}] q='{query}' window={win}  ({total} lines)\n");
     } else {
-        eprintln!("# loki[{name}] q='{query}' window={win}  ({} of {total} lines after filter)\n", recs.len());
+        eprintln!(
+            "# loki[{name}] q='{query}' window={win}  ({} of {total} lines after filter)\n",
+            recs.len()
+        );
     }
     crate::views::dispatch(&recs, view, json);
 }
@@ -581,8 +771,10 @@ fn label_set(metric: &Map<String, Value>) -> String {
     if metric.is_empty() {
         return "{}".to_string();
     }
-    let mut kv: Vec<String> =
-        metric.iter().map(|(k, v)| format!("{k}=\"{}\"", v.as_str().unwrap_or(""))).collect();
+    let mut kv: Vec<String> = metric
+        .iter()
+        .map(|(k, v)| format!("{k}=\"{}\"", v.as_str().unwrap_or("")))
+        .collect();
     kv.sort();
     format!("{{{}}}", kv.join(", "))
 }
@@ -603,25 +795,56 @@ pub fn run_metric(query: &str, ns: &Ns, step: &str, json: bool, time: &TimeRange
             ("step", &format!("{step_s}s")),
         ],
     );
-    let rtype = data.get("data").and_then(|d| d.get("resultType")).and_then(Value::as_str).unwrap_or("");
+    let rtype = data
+        .get("data")
+        .and_then(|d| d.get("resultType"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let empty = Map::new();
-    let series = data.get("data").and_then(|d| d.get("result")).and_then(Value::as_array).cloned().unwrap_or_default();
+    let series = data
+        .get("data")
+        .and_then(|d| d.get("result"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
 
     let mut parsed: Vec<(String, Vec<(f64, f64)>, &Value)> = Vec::new();
     for s in &series {
         let metric = s.get("metric").and_then(Value::as_object).unwrap_or(&empty);
         let mut pts: Vec<(f64, f64)> = Vec::new();
-        let raw = s.get("values").and_then(Value::as_array).cloned().unwrap_or_default();
+        let raw = s
+            .get("values")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         let vector = s.get("value").cloned();
-        let iter: Vec<Value> = if raw.is_empty() { vector.into_iter().collect() } else { raw };
+        let iter: Vec<Value> = if raw.is_empty() {
+            vector.into_iter().collect()
+        } else {
+            raw
+        };
         for p in &iter {
             if let Some(a) = p.as_array() {
-                let t = a.first().and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse().ok()))).unwrap_or(0.0);
-                let v = a.get(1).and_then(|x| x.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let t = a
+                    .first()
+                    .and_then(|x| {
+                        x.as_f64()
+                            .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+                    })
+                    .unwrap_or(0.0);
+                let v = a
+                    .get(1)
+                    .and_then(|x| x.as_str())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
                 pts.push((t, v));
             }
         }
-        parsed.push((label_set(metric), pts, s.get("metric").unwrap_or(&Value::Null)));
+        parsed.push((
+            label_set(metric),
+            pts,
+            s.get("metric").unwrap_or(&Value::Null),
+        ));
     }
 
     if json {
@@ -641,11 +864,16 @@ pub fn run_metric(query: &str, ns: &Ns, step: &str, json: bool, time: &TimeRange
                 })
             })
             .collect();
-        crate::views::print_json(&serde_json::json!({"resultType": rtype, "step": format!("{step_s}s"), "series": arr}));
+        crate::views::print_json(
+            &serde_json::json!({"resultType": rtype, "step": format!("{step_s}s"), "series": arr}),
+        );
         return;
     }
 
-    eprintln!("# loki[{name}] metric q='{query}' window={win} step={step_s}s  ({} series)\n", parsed.len());
+    eprintln!(
+        "# loki[{name}] metric q='{query}' window={win} step={step_s}s  ({} series)\n",
+        parsed.len()
+    );
     if parsed.is_empty() {
         println!("no data");
         return;
@@ -655,7 +883,13 @@ pub fn run_metric(query: &str, ns: &Ns, step: &str, json: bool, time: &TimeRange
         let last = pts.last().map(|(_, v)| *v).unwrap_or(0.0);
         let max = pts.iter().map(|(_, v)| *v).fold(0.0_f64, f64::max);
         println!("{labels}");
-        println!("  pts={} sum={} last={} max={}", pts.len(), trim_num(sum), trim_num(last), trim_num(max));
+        println!(
+            "  pts={} sum={} last={} max={}",
+            pts.len(),
+            trim_num(sum),
+            trim_num(last),
+            trim_num(max)
+        );
     }
 }
 
@@ -681,19 +915,33 @@ pub fn run_labels(ns: &Ns, json: bool, time: &TimeRange, conn: &Conn) {
     let labels: Vec<String> = data
         .get("data")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     if json {
         crate::views::print_json(&serde_json::json!({"datasource": name, "labels": labels}));
         return;
     }
-    eprintln!("# loki[{name}] labels window={win}  ({} labels)\n", labels.len());
+    eprintln!(
+        "# loki[{name}] labels window={win}  ({} labels)\n",
+        labels.len()
+    );
     for l in labels {
         println!("{l}");
     }
 }
 
-pub fn run_values(label: &str, query: Option<&str>, ns: &Ns, json: bool, time: &TimeRange, conn: &Conn) {
+pub fn run_values(
+    label: &str,
+    query: Option<&str>,
+    ns: &Ns,
+    json: bool,
+    time: &TimeRange,
+    conn: &Conn,
+) {
     let (id, name) = prep(conn);
     let query = apply_ns_opt(query, ns);
     let (start_ns, end_ns, win) = window(time);
@@ -707,13 +955,22 @@ pub fn run_values(label: &str, query: Option<&str>, ns: &Ns, json: bool, time: &
     let values: Vec<String> = data
         .get("data")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     if json {
-        crate::views::print_json(&serde_json::json!({"datasource": name, "label": label, "values": values}));
+        crate::views::print_json(
+            &serde_json::json!({"datasource": name, "label": label, "values": values}),
+        );
         return;
     }
-    eprintln!("# loki[{name}] values of '{label}' window={win}  ({} values)\n", values.len());
+    eprintln!(
+        "# loki[{name}] values of '{label}' window={win}  ({} values)\n",
+        values.len()
+    );
     for v in values {
         println!("{v}");
     }
@@ -765,6 +1022,83 @@ mod tests {
         assert_eq!(sanitize_token("Bearer glsa_abc"), "glsa_abc");
         assert_eq!(sanitize_token("  \"glsa_xyz\"  "), "glsa_xyz");
         assert_eq!(sanitize_token("glsa_plain"), "glsa_plain");
+    }
+
+    #[test]
+    fn normalize_url_accepts_https_and_local_http() {
+        assert_eq!(
+            normalize_url("https://g.example.com/").unwrap(),
+            "https://g.example.com"
+        );
+        assert_eq!(
+            normalize_url("  https://g.example.com  ").unwrap(),
+            "https://g.example.com"
+        );
+        assert_eq!(
+            normalize_url("http://localhost:3000").unwrap(),
+            "http://localhost:3000"
+        );
+        assert_eq!(
+            normalize_url("http://127.0.0.1").unwrap(),
+            "http://127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn normalize_url_rejects_cleartext_and_schemeless() {
+        assert!(normalize_url("http://grafana.example.com").is_err());
+        assert!(normalize_url("ftp://x").is_err());
+        assert!(normalize_url("grafana.example.com").is_err());
+        assert!(normalize_url("").is_err());
+        assert!(normalize_url("https://").is_err());
+    }
+
+    #[test]
+    fn ns_ok_allows_safe_rejects_injection() {
+        assert!(ns_ok("prod"));
+        assert!(ns_ok("prod-eu_1.x"));
+        assert!(ns_ok("prod*"));
+        assert!(!ns_ok(""));
+        assert!(!ns_ok("a\"} |bar"));
+        assert!(!ns_ok("a|b"));
+        assert!(!ns_ok("a b"));
+        assert!(!ns_ok("a\\b"));
+    }
+
+    #[test]
+    fn ns_matcher_joins_with_alternation() {
+        assert_eq!(ns_matcher(&["a".into(), "b".into()]), r#"namespace=~"a|b""#);
+    }
+
+    #[test]
+    fn inject_ns_into_empty_and_nonempty_selectors() {
+        assert_eq!(inject_ns("{}", r#"namespace=~"a""#), r#"{namespace=~"a"}"#);
+        assert_eq!(
+            inject_ns(r#"{service="x"}"#, r#"namespace=~"a""#),
+            r#"{namespace=~"a", service="x"}"#
+        );
+        assert_eq!(
+            inject_ns("no-selector", r#"namespace=~"a""#),
+            r#"{namespace=~"a"}"#
+        );
+    }
+
+    #[test]
+    fn selector_has_namespace_detects_matchers() {
+        assert!(selector_has_namespace(r#"{namespace="prod"}"#));
+        assert!(selector_has_namespace(r#"{namespace=~"a|b"}"#));
+        assert!(selector_has_namespace(r#"{namespace!="x"}"#));
+        assert!(!selector_has_namespace(r#"{service="x"}"#));
+        assert!(!selector_has_namespace("no braces"));
+    }
+
+    #[test]
+    fn clip_is_char_safe() {
+        assert_eq!(clip("hello", 3), "hel");
+        assert_eq!(clip("hi", 10), "hi");
+        let s = "héllo wörld ☃";
+        assert_eq!(clip(s, 2), "hé");
+        let _ = clip(s, 8);
     }
 
     #[test]

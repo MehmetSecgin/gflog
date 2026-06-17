@@ -34,11 +34,29 @@ pub fn normalize(line: &str, date: &str, fields: &Map<String, Value>) -> Record 
     };
     let o = &o;
 
-    let msg = get(o, "message").map(str::to_string).unwrap_or_else(|| line.to_string());
-    let level = first(&[get(o, "level"), get(fields, "level"), get(fields, "detected_level")]);
-    let level = if level.is_empty() { "?".into() } else { level.to_uppercase() };
-    let service = first(&[get(fields, "service_name"), get(fields, "app"), get(o, "application_name")]);
-    let service = if service.is_empty() { "?".into() } else { service };
+    let msg = get(o, "message")
+        .map(str::to_string)
+        .unwrap_or_else(|| line.to_string());
+    let level = first(&[
+        get(o, "level"),
+        get(fields, "level"),
+        get(fields, "detected_level"),
+    ]);
+    let level = if level.is_empty() {
+        "?".into()
+    } else {
+        level.to_uppercase()
+    };
+    let service = first(&[
+        get(fields, "service_name"),
+        get(fields, "app"),
+        get(o, "application_name"),
+    ]);
+    let service = if service.is_empty() {
+        "?".into()
+    } else {
+        service
+    };
 
     Record {
         ts: first(&[(!date.is_empty()).then_some(date), get(o, "@timestamp")]),
@@ -48,7 +66,11 @@ pub fn normalize(line: &str, date: &str, fields: &Map<String, Value>) -> Record 
         namespace: get(fields, "namespace").unwrap_or("").to_string(),
         logger: get(o, "logger_name").unwrap_or("").to_string(),
         thread: get(o, "thread_name").unwrap_or("").to_string(),
-        trace: first(&[get(o, "traceId"), get(o, "trace_id"), get(fields, "TraceID")]),
+        trace: first(&[
+            get(o, "traceId"),
+            get(o, "trace_id"),
+            get(fields, "TraceID"),
+        ]),
         msg,
         stack: get(o, "stack_trace").unwrap_or("").to_string(),
     }
@@ -106,13 +128,20 @@ mod tests {
     use super::*;
 
     fn fields(pairs: &[(&str, &str)]) -> Map<String, Value> {
-        pairs.iter().map(|(k, v)| (k.to_string(), Value::String(v.to_string()))).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+            .collect()
     }
 
     #[test]
     fn normalize_json_line() {
         let line = r#"{"message":"boom","level":"error","logger_name":"a.b.C","traceId":"t1","stack_trace":"x"}"#;
-        let f = fields(&[("service_name", "svc"), ("pod", "p1"), ("namespace", "prod")]);
+        let f = fields(&[
+            ("service_name", "svc"),
+            ("pod", "p1"),
+            ("namespace", "prod"),
+        ]);
         let r = normalize(line, "2026-06-04T09:00:00.000Z", &f);
         assert_eq!(r.msg, "boom");
         assert_eq!(r.level, "ERROR");
@@ -175,7 +204,10 @@ mod tests {
 
     #[test]
     fn short_ts_and_last_segment() {
-        assert_eq!(short_ts("2026-06-04T09:00:01.123Z"), "2026-06-04 09:00:01.123");
+        assert_eq!(
+            short_ts("2026-06-04T09:00:01.123Z"),
+            "2026-06-04 09:00:01.123"
+        );
         assert_eq!(short_ts(""), "?");
         assert_eq!(last_segment("com.bp.Foo"), "Foo");
         assert_eq!(last_segment("Foo"), "Foo");

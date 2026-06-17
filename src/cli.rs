@@ -47,7 +47,12 @@ pub struct Filter {
 #[derive(Args)]
 pub struct Ns {
     /// scope the stream selector to these namespaces (repeatable or comma-separated); injects namespace=~"a|b"
-    #[arg(long = "namespace", visible_alias = "ns", global = true, value_delimiter = ',')]
+    #[arg(
+        long = "namespace",
+        visible_alias = "ns",
+        global = true,
+        value_delimiter = ','
+    )]
     pub namespace: Vec<String>,
 }
 

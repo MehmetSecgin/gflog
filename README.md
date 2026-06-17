@@ -50,7 +50,7 @@ less install.sh && sh install.sh
 ```
 
 It verifies the sha256 and refuses to install if the checksum is missing or wrong.
-Overrides: `GFLOG_INSTALL_DIR=~/.local/bin`, `GFLOG_VERSION=v0.3.0`, `GFLOG_YES=1` (skip the
+Overrides: `GFLOG_INSTALL_DIR=~/.local/bin`, `GFLOG_VERSION=v0.4.0`, `GFLOG_YES=1` (skip the
 prompt for automation).
 
 ## Point it at your Grafana
@@ -63,6 +63,9 @@ gflog url https://grafana.example.com     # saved to ~/.config/grafana-logs/url
 
 or export `GRAFANA_URL` (takes precedence). `gflog url` prints the current value.
 
+The URL must be `https://` (your token/cookie is attached to every request — cleartext is
+refused); `http://` is allowed only for `localhost`/`127.0.0.1`.
+
 ## Authenticate
 
 A **service-account Bearer token** (preferred) or a **session cookie**:
@@ -72,6 +75,9 @@ gflog token            # read a token from the clipboard, save, and test
 gflog cookie           # read a grafana_session cookie from the clipboard
 gflog token --test     # check the current credential
 ```
+
+Clipboard reads use `pbpaste` (macOS) or `wl-paste`/`xclip`/`xsel` (Linux); if none is
+available, pass the value as an argument or pipe it with `--stdin`.
 
 Resolution order: `$GRAFANA_TOKEN` → `~/.config/grafana-logs/token` → cookie file. A token is
 decoupled from your browser session; a shared cookie is kept alive by rotation (toggle with
@@ -99,7 +105,8 @@ command for machine-readable output.
 ### Scoping
 - `--datasource SUBSTR` — pick a Loki datasource when several exist (cached after first use).
 - `--namespace`/`--ns a,b` — inject `namespace=~"a|b"` into the stream selector (repeatable or
-  comma-separated). An explicit `namespace=...` in your `-q` always wins.
+  comma-separated; values restricted to `[A-Za-z0-9._*-]`). An explicit `namespace=...` in your
+  `-q` always wins; for a fully custom matcher, write it in `-q` directly.
 - `--since 30m` / `--start` / `--end`, `--limit N`, record filters `--service`/`--logger`/
   `--match`/`--after`/`--before`.
 

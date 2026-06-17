@@ -1,4 +1,4 @@
-use crate::record::{normalize, Record};
+use crate::record::{Record, normalize};
 use serde_json::{Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,12 +23,12 @@ pub fn resolve(arg: Option<&str>) -> PathBuf {
         if Path::new(a).is_file() {
             return PathBuf::from(a);
         }
-        if a.contains('*') || a.contains('?') {
-            if let Ok(g) = glob::glob(a) {
-                let hits: Vec<PathBuf> = g.filter_map(Result::ok).collect();
-                if let Some(p) = newest(hits) {
-                    return p;
-                }
+        if (a.contains('*') || a.contains('?'))
+            && let Ok(g) = glob::glob(a)
+        {
+            let hits: Vec<PathBuf> = g.filter_map(Result::ok).collect();
+            if let Some(p) = newest(hits) {
+                return p;
             }
         }
         let in_dl = downloads().join(a);
@@ -45,7 +45,9 @@ pub fn resolve(arg: Option<&str>) -> PathBuf {
     }
     match newest(hits) {
         Some(p) => p,
-        None => crate::die("no log file found (pass a path or put a Grafana JSON export in ~/Downloads)"),
+        None => crate::die(
+            "no log file found (pass a path or put a Grafana JSON export in ~/Downloads)",
+        ),
     }
 }
 
@@ -88,6 +90,9 @@ fn rec_from_value(v: &Value) -> Record {
     let obj = v.as_object().unwrap_or(&empty);
     let line = obj.get("line").and_then(Value::as_str).unwrap_or("");
     let date = obj.get("date").and_then(Value::as_str).unwrap_or("");
-    let fields = obj.get("fields").and_then(Value::as_object).unwrap_or(&empty);
+    let fields = obj
+        .get("fields")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
     normalize(line, date, fields)
 }
