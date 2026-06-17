@@ -26,10 +26,10 @@ jobs:
           tag_ver="${latest_tag#v}"; [ -z "$latest_tag" ] && tag_ver="0.0.0"
           higher=$(printf '%s\n%s\n' "$cargo_ver" "$tag_ver" | sort -V | tail -n1)
           if [ "$cargo_ver" != "$tag_ver" ] && [ "$higher" = "$cargo_ver" ] && ! git rev-parse "v$cargo_ver" >/dev/null 2>&1; then
-            next="$cargo_ver"            # honor a manual minor/major bump in Cargo.toml
+            next="$cargo_ver"            # honor a manual bump in Cargo.toml (e.g. a major)
           else
             IFS=. read -r MA MI PA <<<"$higher"
-            next="$MA.$MI.$((PA + 1))"   # otherwise auto-bump patch
+            next="$MA.$((MI + 1)).0"     # otherwise auto-bump minor
           fi
           echo "next=$next" >> "$GITHUB_OUTPUT"
           echo "tag=v$next" >> "$GITHUB_OUTPUT"
