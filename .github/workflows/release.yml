@@ -12,11 +12,11 @@ jobs:
     name: build · package · release (macOS arm64)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - name: build
-        run: cargo build --release
+        run: cargo build --release --locked
       - name: package
         run: |
           asset="gflog-${GITHUB_REF_NAME}-aarch64-apple-darwin.tar.gz"

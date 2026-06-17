@@ -10,22 +10,35 @@ env:
 
 jobs:
   test:
-    name: build · test · clippy
+    name: build · test · clippy · fmt
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: clippy (non-blocking — informational, not a gate)
-        continue-on-error: true
-        run: cargo clippy --all-targets
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - name: fmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
       - name: test
-        run: cargo test --all
+        run: cargo test --all --locked
       - name: build (release)
-        run: cargo build --release
+        run: cargo build --release --locked
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - name: install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: audit
+        run: cargo audit
