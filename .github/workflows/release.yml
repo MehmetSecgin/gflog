@@ -3,7 +3,6 @@ name: Release
 on:
   push:
     branches: [main]
-    paths: ['Cargo.toml']
   workflow_dispatch:
 
 permissions:
@@ -11,40 +10,47 @@ permissions:
 
 jobs:
   release:
-    name: tag · build · package · release (macOS arm64)
+    name: version · build · package · release (macOS arm64)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: resolve version
+        with:
+          fetch-depth: 0
+      - name: resolve next version
         id: v
-        env:
-          GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
-          version=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
-          tag="v$version"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "release $tag already exists — skipping"
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          cargo_ver=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          latest_tag=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+          tag_ver="${latest_tag#v}"; [ -z "$latest_tag" ] && tag_ver="0.0.0"
+          higher=$(printf '%s\n%s\n' "$cargo_ver" "$tag_ver" | sort -V | tail -n1)
+          if [ "$cargo_ver" != "$tag_ver" ] && [ "$higher" = "$cargo_ver" ] && ! git rev-parse "v$cargo_ver" >/dev/null 2>&1; then
+            next="$cargo_ver"            # honor a manual minor/major bump in Cargo.toml
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            IFS=. read -r MA MI PA <<<"$higher"
+            next="$MA.$MI.$((PA + 1))"   # otherwise auto-bump patch
           fi
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+          echo "releasing v$next (cargo=$cargo_ver, latest_tag=${latest_tag:-none})"
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        if: steps.v.outputs.exists == 'false'
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-        if: steps.v.outputs.exists == 'false'
+      - name: stamp version
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i '' -E "0,/^version = \"[^\"]+\"/s//version = \"${{ steps.v.outputs.next }}\"/" Cargo.toml
+          cargo update -p gflog --precise "${{ steps.v.outputs.next }}"
       - name: build
-        if: steps.v.outputs.exists == 'false'
         run: cargo build --release --locked
       - name: package
-        if: steps.v.outputs.exists == 'false'
         run: |
           asset="gflog-${{ steps.v.outputs.tag }}-aarch64-apple-darwin.tar.gz"
           tar -czf "$asset" -C target/release gflog
           shasum -a 256 "$asset" | tee "$asset.sha256"
           echo "ASSET=$asset" >> "$GITHUB_ENV"
       - name: release
-        if: steps.v.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
