@@ -2,32 +2,54 @@ name: Release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    paths: ['Cargo.toml']
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  macos-arm64:
-    name: build · package · release (macOS arm64)
+  release:
+    name: tag · build · package · release (macOS arm64)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: resolve version
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          tag="v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists — skipping"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        if: steps.v.outputs.exists == 'false'
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        if: steps.v.outputs.exists == 'false'
       - name: build
+        if: steps.v.outputs.exists == 'false'
         run: cargo build --release --locked
       - name: package
+        if: steps.v.outputs.exists == 'false'
         run: |
-          asset="gflog-${GITHUB_REF_NAME}-aarch64-apple-darwin.tar.gz"
+          asset="gflog-${{ steps.v.outputs.tag }}-aarch64-apple-darwin.tar.gz"
           tar -czf "$asset" -C target/release gflog
           shasum -a 256 "$asset" | tee "$asset.sha256"
           echo "ASSET=$asset" >> "$GITHUB_ENV"
       - name: release
+        if: steps.v.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "${{ steps.v.outputs.tag }}" \
             "$ASSET" "$ASSET.sha256" \
-            --title "$GITHUB_REF_NAME" \
+            --target "$GITHUB_SHA" \
+            --title "${{ steps.v.outputs.tag }}" \
             --generate-notes
