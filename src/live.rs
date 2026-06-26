@@ -1,6 +1,6 @@
 use crate::cli::{Conn, Filter, Ns, TimeRange, View};
 use crate::record::normalize;
-use chrono::{NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, RequestBuilder};
 use reqwest::header::SET_COOKIE;
@@ -585,15 +585,31 @@ fn to_ns(s: &str, now: i64) -> i64 {
         let n: i64 = s.parse().unwrap_or(0);
         return n * if s.len() > 17 { 1 } else { 1_000_000_000 };
     }
-    let head = s.split('.').next().unwrap_or(s);
-    match NaiveDateTime::parse_from_str(head, "%Y-%m-%dT%H:%M:%S") {
-        Ok(ndt) => chrono::Local
-            .from_local_datetime(&ndt)
-            .single()
-            .map(|dt| dt.timestamp() * 1_000_000_000)
-            .unwrap_or(now),
-        Err(_) => crate::die(&format!("cannot parse time {s:?}")),
+    match parse_iso_ns(s) {
+        Some(ns) => ns,
+        None => crate::die(&format!("cannot parse time {s:?}")),
     }
+}
+
+fn parse_iso_ns(s: &str) -> Option<i64> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return dt.timestamp_nanos_opt();
+    }
+    for fmt in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+    ] {
+        if let Ok(ndt) = NaiveDateTime::parse_from_str(s, fmt) {
+            return ndt.and_utc().timestamp_nanos_opt();
+        }
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return d
+            .and_hms_opt(0, 0, 0)
+            .and_then(|ndt| ndt.and_utc().timestamp_nanos_opt());
+    }
+    None
 }
 
 fn iso_from_ns(ts_ns: i64) -> String {
@@ -618,7 +634,7 @@ fn window(t: &TimeRange) -> (i64, i64, String) {
         Some(s) => to_ns(s, now),
         None => end_ns - duration_secs(&t.since) * 1_000_000_000,
     };
-    let win = format!("{}..{}", t.start.as_deref().unwrap_or(&t.since), t.end);
+    let win = format!("{}..{}", iso_from_ns(start_ns), iso_from_ns(end_ns));
     (start_ns, end_ns, win)
 }
 
@@ -999,6 +1015,59 @@ mod tests {
     fn to_ns_epoch_seconds_vs_nanos() {
         assert_eq!(to_ns("1700000000", NOW), 1_700_000_000 * 1_000_000_000);
         assert_eq!(to_ns("1700000000000000000", NOW), 1_700_000_000_000_000_000);
+    }
+
+    fn utc_ns(rfc3339: &str) -> i64 {
+        DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap()
+    }
+
+    #[test]
+    fn to_ns_bare_iso_is_utc_not_local() {
+        let expected = utc_ns("2026-06-24T18:00:00Z");
+        assert_eq!(to_ns("2026-06-24T18:00:00", NOW), expected);
+        assert_eq!(to_ns("2026-06-24T18:00:00Z", NOW), expected);
+    }
+
+    #[test]
+    fn to_ns_honors_explicit_offset() {
+        assert_eq!(
+            to_ns("2026-06-24T21:00:00+03:00", NOW),
+            to_ns("2026-06-24T18:00:00Z", NOW)
+        );
+        assert_eq!(
+            to_ns("2026-06-24T15:00:00-03:00", NOW),
+            utc_ns("2026-06-24T18:00:00Z")
+        );
+    }
+
+    #[test]
+    fn to_ns_keeps_fractional_seconds() {
+        assert_eq!(
+            to_ns("2026-06-24T18:00:00.500", NOW),
+            utc_ns("2026-06-24T18:00:00Z") + 500_000_000
+        );
+    }
+
+    #[test]
+    fn parse_iso_ns_minute_and_date_precision_as_utc() {
+        assert_eq!(
+            parse_iso_ns("2026-06-24T18:00"),
+            Some(utc_ns("2026-06-24T18:00:00Z"))
+        );
+        assert_eq!(
+            parse_iso_ns("2026-06-24"),
+            Some(utc_ns("2026-06-24T00:00:00Z"))
+        );
+        assert_eq!(parse_iso_ns("not-a-time"), None);
+    }
+
+    #[test]
+    fn iso_from_ns_renders_explicit_z() {
+        let ns = utc_ns("2026-06-24T18:05:00Z");
+        assert_eq!(iso_from_ns(ns), "2026-06-24T18:05:00.000Z");
     }
 
     #[test]
