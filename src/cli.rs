@@ -225,11 +225,35 @@ mod tests {
     #[test]
     fn json_global_accepted_in_every_position() {
         // before the subcommand (the previously-broken position)
-        assert!(json_of(&["gflog", "--json", "live", "-q", "{x=\"y\"}", "grep", "."]));
+        assert!(json_of(&[
+            "gflog",
+            "--json",
+            "live",
+            "-q",
+            "{x=\"y\"}",
+            "grep",
+            "."
+        ]));
         // after the subcommand
-        assert!(json_of(&["gflog", "live", "--json", "-q", "{x=\"y\"}", "grep", "."]));
+        assert!(json_of(&[
+            "gflog",
+            "live",
+            "--json",
+            "-q",
+            "{x=\"y\"}",
+            "grep",
+            "."
+        ]));
         // after the view
-        assert!(json_of(&["gflog", "live", "-q", "{x=\"y\"}", "grep", ".", "--json"]));
+        assert!(json_of(&[
+            "gflog",
+            "live",
+            "-q",
+            "{x=\"y\"}",
+            "grep",
+            ".",
+            "--json"
+        ]));
         // metric / file / discovery
         assert!(json_of(&["gflog", "--json", "metric", "-q", "{x=\"y\"}"]));
         assert!(json_of(&["gflog", "--json", "file", "summary"]));

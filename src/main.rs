@@ -18,11 +18,7 @@ fn main() {
     let cli = Cli::parse();
     let json = cli.json;
     match cli.source {
-        Source::File {
-            file,
-            filter,
-            view,
-        } => {
+        Source::File { file, filter, view } => {
             let (recs, name) = if file.as_deref() == Some("-") {
                 (offline::load_stdin(), "stdin".to_string())
             } else {
