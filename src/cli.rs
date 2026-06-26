@@ -61,10 +61,10 @@ pub struct TimeRange {
     /// lookback window (30m, 2h, 1d). Default 1h. Ignored if --start given
     #[arg(long, default_value = "1h")]
     pub since: String,
-    /// absolute start: ISO ts or epoch (s/ns)
+    /// absolute start: RFC3339 (Z/±HH:MM honored; bare ISO with no offset = UTC) or epoch (s/ns)
     #[arg(long)]
     pub start: Option<String>,
-    /// absolute end: ISO/epoch/now. Default now
+    /// absolute end: RFC3339 (no offset = UTC), epoch, or 'now'. Default now
     #[arg(long, default_value = "now")]
     pub end: String,
 }
