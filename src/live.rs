@@ -181,9 +181,7 @@ fn save_rotated(set_cookies: &[String]) {
             .unwrap_or_default();
         if tok != cur {
             let _ = fs::create_dir_all(cfg_dir());
-            if fs::write(cookie_file(), tok).is_ok() {
-                set_600(&cookie_file());
-            }
+            let _ = write_atomic(&cookie_file(), tok);
         }
     }
 }
@@ -196,6 +194,13 @@ fn set_600(p: &PathBuf) {
     }
 }
 
+fn write_atomic(path: &PathBuf, content: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, content)?;
+    set_600(&tmp);
+    fs::rename(&tmp, path)
+}
+
 fn collect_set_cookies(resp: &reqwest::blocking::Response) -> Vec<String> {
     resp.headers()
         .get_all(SET_COOKIE)
@@ -204,30 +209,54 @@ fn collect_set_cookies(resp: &reqwest::blocking::Response) -> Vec<String> {
         .collect()
 }
 
-fn api(path: &str, params: &[(&str, &str)]) -> Value {
-    let url = format!("{}{path}", base());
-    let resp = match with_headers(client().get(&url).query(params)).send() {
+fn http_get(url: &str, params: &[(&str, &str)]) -> (StatusCode, Vec<String>, String) {
+    let resp = match with_headers(client().get(url).query(params)).send() {
         Ok(r) => r,
         Err(e) => crate::die(&format!("cannot reach {}: {e}", base())),
     };
     let status = resp.status();
     let cookies = collect_set_cookies(&resp);
     let body = resp.text().unwrap_or_default();
+    (status, cookies, body)
+}
+
+fn is_auth_err(status: StatusCode) -> bool {
+    status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN
+}
+
+fn auth_die(status: StatusCode, body: &str) -> ! {
+    let fix = if token_value().is_some() {
+        "token rejected — check/replace it:\n  gflog token --test"
+    } else {
+        "session expired and the refresh attempt failed — re-copy the cookie:\n  gflog cookie\n(tip: a service-account Bearer token never rotates and avoids this — see `gflog token`)"
+    };
+    crate::die(&format!(
+        "auth failed ({}). {fix}\n{}",
+        status.as_u16(),
+        clip(body, 300)
+    ));
+}
+
+fn api(path: &str, params: &[(&str, &str)]) -> Value {
+    let url = format!("{}{path}", base());
+    let (status, cookies, body) = http_get(&url, params);
     if status.is_success() {
         save_rotated(&cookies);
         return serde_json::from_str(&body).unwrap_or(Value::Null);
     }
-    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-        let fix = if token_value().is_some() {
-            "token rejected — check/replace it:\n  gflog token --test"
-        } else {
-            "session expired — refresh it:\n  gflog cookie"
-        };
-        crate::die(&format!(
-            "auth failed ({}). {fix}\n{}",
-            status.as_u16(),
-            clip(&body, 300)
-        ));
+    if is_auth_err(status) {
+        // A Bearer token never rotates, so a retry can't help — fail clearly now.
+        // For a cookie, the prior rotation may have left a stale value: refresh once
+        // and retry a single time before giving up.
+        if token_value().is_none() && rotate(false) {
+            let (status2, cookies2, body2) = http_get(&url, params);
+            if status2.is_success() {
+                save_rotated(&cookies2);
+                return serde_json::from_str(&body2).unwrap_or(Value::Null);
+            }
+            auth_die(status2, &body2);
+        }
+        auth_die(status, &body);
     }
     crate::die(&format!(
         "HTTP {} from {path}\n{}",
@@ -417,10 +446,9 @@ pub fn cmd_cookie(value: Option<String>, stdin: bool, test: bool) {
         crate::die(&format!("could not parse a cookie token from {src}"));
     }
     let _ = fs::create_dir_all(cfg_dir());
-    if let Err(e) = fs::write(cookie_file(), &tok) {
+    if let Err(e) = write_atomic(&cookie_file(), &tok) {
         crate::die(&format!("cannot write {}: {e}", cookie_file().display()));
     }
-    set_600(&cookie_file());
     let tail: String = tok
         .chars()
         .rev()
@@ -482,10 +510,9 @@ pub fn cmd_token(value: Option<String>, stdin: bool, test: bool, clear: bool) {
         crate::die(&format!("could not parse a token from {src}"));
     }
     let _ = fs::create_dir_all(cfg_dir());
-    if let Err(e) = fs::write(token_file(), &tok) {
+    if let Err(e) = write_atomic(&token_file(), &tok) {
         crate::die(&format!("cannot write {}: {e}", token_file().display()));
     }
-    set_600(&token_file());
     let tail: String = tok
         .chars()
         .rev()
@@ -1077,6 +1104,26 @@ mod tests {
         assert_eq!(duration_secs("2h"), 7_200);
         assert_eq!(duration_secs("1d"), 86_400);
         assert_eq!(duration_secs("45s"), 45);
+    }
+
+    #[test]
+    fn is_auth_err_matches_401_403_only() {
+        assert!(is_auth_err(StatusCode::UNAUTHORIZED));
+        assert!(is_auth_err(StatusCode::FORBIDDEN));
+        assert!(!is_auth_err(StatusCode::OK));
+        assert!(!is_auth_err(StatusCode::INTERNAL_SERVER_ERROR));
+    }
+
+    #[test]
+    fn write_atomic_writes_overwrites_and_leaves_no_tmp() {
+        let p = std::env::temp_dir().join("gflog_test_atomic_cred");
+        let _ = fs::remove_file(&p);
+        write_atomic(&p, "first").unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "first");
+        write_atomic(&p, "second").unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "second");
+        assert!(!p.with_extension("tmp").exists());
+        let _ = fs::remove_file(&p);
     }
 
     #[test]

@@ -83,6 +83,12 @@ Resolution order: `$GRAFANA_TOKEN` → `~/.config/grafana-logs/token` → cookie
 decoupled from your browser session; a shared cookie is kept alive by rotation (toggle with
 `--no-rotate`).
 
+**Prefer a Bearer token for anything scripted or high-frequency.** A token never rotates, so
+it is immune to the cookie-rotation races that can otherwise surface as intermittent empty
+results across rapid back-to-back calls. With cookie auth, gflog refreshes once and retries a
+single time on an HTTP 401 and writes the rotated cookie atomically; if the refresh still
+fails it stops with a clear `auth failed (401)` message rather than returning silent 0 rows.
+
 ## Use
 
 ```
