@@ -50,20 +50,42 @@ fn count_by<'a>(recs: &'a [Record], key: impl Fn(&'a Record) -> &'a str) -> Vec<
     out
 }
 
-pub fn dispatch(recs: &[Record], view: &View, json_out: bool) {
+pub fn dispatch(recs: &[Record], view: &View, json_out: bool, full: bool) {
     match view {
-        View::Summary => summary(recs, json_out),
-        View::Errors { warn, level } => errors(recs, *warn, level.as_deref(), json_out),
+        View::Summary => summary(recs, json_out, full),
+        View::Errors { warn, level } => errors(recs, *warn, level.as_deref(), json_out, full),
         View::Grep {
             pattern,
             ignore_case,
             limit,
-        } => grep(recs, pattern, *ignore_case, *limit, json_out),
-        View::Trace { trace_id } => trace(recs, trace_id, json_out),
+        } => grep(recs, pattern, *ignore_case, *limit, json_out, full),
+        View::Trace { trace_id } => trace(recs, trace_id, json_out, full),
         View::Show { index } => show(recs, *index, json_out),
-        View::Patterns { limit, level } => patterns(recs, *limit, level.as_deref(), json_out),
+        View::Patterns { limit, level } => patterns(recs, *limit, level.as_deref(), json_out, full),
         View::Timeline { buckets } => timeline(recs, *buckets, json_out),
     }
+}
+
+fn body(msg: &str, full: bool, width: usize) -> String {
+    if full {
+        msg.trim_end().to_string()
+    } else {
+        oneline(msg, width)
+    }
+}
+
+fn record_json(index: Option<usize>, r: &Record) -> Value {
+    let mut o = json!({
+        "ts": r.ts, "level": r.level, "service": r.service, "pod": r.pod,
+        "namespace": r.namespace, "logger": r.logger, "thread": r.thread,
+        "trace": r.trace, "msg": r.msg, "stack": r.stack,
+    });
+    if let Some(i) = index
+        && let Some(m) = o.as_object_mut()
+    {
+        m.insert("index".into(), json!(i));
+    }
+    o
 }
 
 fn cluster_errors(recs: &[Record]) -> (usize, Vec<(String, Vec<&Record>)>) {
@@ -88,7 +110,7 @@ fn cluster_errors(recs: &[Record]) -> (usize, Vec<(String, Vec<&Record>)>) {
     (total, clusters)
 }
 
-fn summary(recs: &[Record], json_out: bool) {
+fn summary(recs: &[Record], json_out: bool, full: bool) {
     let ts: Vec<&str> = recs
         .iter()
         .map(|r| r.ts.as_str())
@@ -153,7 +175,7 @@ fn summary(recs: &[Record], json_out: bool) {
                 "  {:>5}x [{}] {}",
                 rs.len(),
                 rs[0].level,
-                oneline(&rs[0].msg, 120)
+                body(&rs[0].msg, full, 120)
             );
         }
     }
@@ -169,7 +191,7 @@ fn level_set(warn: bool, level: Option<&str>) -> Vec<String> {
     }
 }
 
-fn errors(recs: &[Record], warn: bool, level: Option<&str>, json_out: bool) {
+fn errors(recs: &[Record], warn: bool, level: Option<&str>, json_out: bool, full: bool) {
     let mut levels = level_set(warn, level);
     levels.sort();
     let matched: Vec<(usize, &Record)> = recs
@@ -179,13 +201,7 @@ fn errors(recs: &[Record], warn: bool, level: Option<&str>, json_out: bool) {
         .collect();
 
     if json_out {
-        let arr: Vec<Value> = matched
-            .iter()
-            .map(|(i, r)| {
-                json!({"index": i, "ts": r.ts, "level": r.level, "service": r.service,
-                       "logger": r.logger, "trace": r.trace, "msg": r.msg, "stack": !r.stack.is_empty()})
-            })
-            .collect();
+        let arr: Vec<Value> = matched.iter().map(|(i, r)| record_json(Some(*i), r)).collect();
         print_json(&json!({"levels": levels, "count": arr.len(), "records": arr}));
         return;
     }
@@ -204,11 +220,14 @@ fn errors(recs: &[Record], warn: bool, level: Option<&str>, json_out: bool) {
             r.service,
             last_segment(&r.logger)
         );
-        println!("     {}", oneline(&r.msg, 160));
+        println!("     {}", body(&r.msg, full, 160));
+        if full && !r.stack.is_empty() {
+            println!("     STACK: {}", r.stack.trim_end());
+        }
     }
 }
 
-fn grep(recs: &[Record], pattern: &str, ignore_case: bool, limit: usize, json_out: bool) {
+fn grep(recs: &[Record], pattern: &str, ignore_case: bool, limit: usize, json_out: bool, full: bool) {
     let rx = match RegexBuilder::new(pattern)
         .case_insensitive(ignore_case)
         .build()
@@ -228,13 +247,7 @@ fn grep(recs: &[Record], pattern: &str, ignore_case: bool, limit: usize, json_ou
         }
     }
     if json_out {
-        let arr: Vec<Value> = hits
-            .iter()
-            .map(|(i, r)| {
-                json!({"index": i, "ts": r.ts, "level": r.level, "service": r.service,
-                                 "trace": r.trace, "msg": r.msg})
-            })
-            .collect();
+        let arr: Vec<Value> = hits.iter().map(|(i, r)| record_json(Some(*i), r)).collect();
         print_json(
             &json!({"pattern": pattern, "count": arr.len(), "truncated": truncated, "records": arr}),
         );
@@ -252,27 +265,24 @@ fn grep(recs: &[Record], pattern: &str, ignore_case: bool, limit: usize, json_ou
             r.level,
             r.service
         );
-        println!("     {}", oneline(&r.msg, 160));
+        println!("     {}", body(&r.msg, full, 160));
+        if full && !r.stack.is_empty() {
+            println!("     STACK: {}", r.stack.trim_end());
+        }
     }
     if truncated {
         println!("... stopped at {limit} (use --limit)");
     }
 }
 
-fn trace(recs: &[Record], trace_id: &str, json_out: bool) {
+fn trace(recs: &[Record], trace_id: &str, json_out: bool, full: bool) {
     let mut out: Vec<&Record> = recs
         .iter()
         .filter(|r| !r.trace.is_empty() && r.trace.starts_with(trace_id))
         .collect();
     out.sort_by(|a, b| a.ts.cmp(&b.ts));
     if json_out {
-        let arr: Vec<Value> = out
-            .iter()
-            .map(|r| {
-                json!({"ts": r.ts, "level": r.level, "service": r.service, "logger": r.logger,
-                            "msg": r.msg, "stack": (!r.stack.is_empty()).then(|| r.stack.clone())})
-            })
-            .collect();
+        let arr: Vec<Value> = out.iter().map(|r| record_json(None, r)).collect();
         print_json(&json!({"trace": trace_id, "count": arr.len(), "records": arr}));
         return;
     }
@@ -285,9 +295,14 @@ fn trace(recs: &[Record], trace_id: &str, json_out: bool) {
             r.service,
             last_segment(&r.logger)
         );
-        println!("  {}", oneline(&r.msg, 160));
+        println!("  {}", body(&r.msg, full, 160));
         if !r.stack.is_empty() {
-            println!("  STACK: {}", oneline(&r.stack, 200));
+            let stack = if full {
+                r.stack.trim_end().to_string()
+            } else {
+                oneline(&r.stack, 200)
+            };
+            println!("  STACK: {stack}");
         }
     }
 }
@@ -320,7 +335,7 @@ fn show(recs: &[Record], index: usize, json_out: bool) {
     }
 }
 
-fn patterns(recs: &[Record], limit: usize, level: Option<&str>, json_out: bool) {
+fn patterns(recs: &[Record], limit: usize, level: Option<&str>, json_out: bool, full: bool) {
     let want: Option<Vec<String>> =
         level.map(|l| l.split(',').map(|s| s.trim().to_uppercase()).collect());
     let mut idx: HashMap<String, usize> = HashMap::new();
@@ -364,7 +379,7 @@ fn patterns(recs: &[Record], limit: usize, level: Option<&str>, json_out: bool) 
         println!(
             "{count:>6}x [{}] #{first}  {}",
             levels.join("/"),
-            oneline(&sample, 120)
+            body(&sample, full, 120)
         );
     }
 }
@@ -533,6 +548,32 @@ mod tests {
             ..empty_filter()
         };
         assert_eq!(apply_filter(sample(), &f).len(), 1);
+    }
+
+    #[test]
+    fn body_truncates_unless_full() {
+        let long = "x".repeat(500);
+        let truncated = body(&long, false, 120);
+        assert_eq!(truncated.chars().count(), 120);
+        assert!(truncated.ends_with('…'));
+        let whole = body(&long, true, 120);
+        assert_eq!(whole.chars().count(), 500);
+        assert!(!whole.ends_with('…'));
+    }
+
+    #[test]
+    fn record_json_carries_full_msg_and_stack() {
+        let mut r = rec("svc", "ERROR", "a.b.C", &"m".repeat(400), "2026-06-04T09:00:01Z");
+        r.stack = "s".repeat(800);
+        r.trace = "t1".into();
+        let with_index = record_json(Some(7), &r);
+        assert_eq!(with_index["index"], 7);
+        assert_eq!(with_index["msg"].as_str().unwrap().len(), 400);
+        assert_eq!(with_index["stack"].as_str().unwrap().len(), 800);
+        assert_eq!(with_index["trace"], "t1");
+        // without an index the key is absent
+        let no_index = record_json(None, &r);
+        assert!(no_index.get("index").is_none());
     }
 
     #[test]

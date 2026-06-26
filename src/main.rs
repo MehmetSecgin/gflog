@@ -17,6 +17,7 @@ pub fn die(msg: &str) -> ! {
 fn main() {
     let cli = Cli::parse();
     let json = cli.json;
+    let full = cli.full;
     match cli.source {
         Source::File { file, filter, view } => {
             let (recs, name) = if file.as_deref() == Some("-") {
@@ -40,7 +41,7 @@ fn main() {
                     recs.len()
                 );
             }
-            views::dispatch(&recs, &view, json);
+            views::dispatch(&recs, &view, json, full);
         }
         Source::Live {
             query,
@@ -51,7 +52,7 @@ fn main() {
             filter,
             view,
         } => {
-            live::run_live(&query, &ns, limit, json, &time, &conn, &filter, &view);
+            live::run_live(&query, &ns, limit, json, full, &time, &conn, &filter, &view);
         }
         Source::Metric {
             query,
