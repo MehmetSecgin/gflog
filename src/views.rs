@@ -201,7 +201,10 @@ fn errors(recs: &[Record], warn: bool, level: Option<&str>, json_out: bool, full
         .collect();
 
     if json_out {
-        let arr: Vec<Value> = matched.iter().map(|(i, r)| record_json(Some(*i), r)).collect();
+        let arr: Vec<Value> = matched
+            .iter()
+            .map(|(i, r)| record_json(Some(*i), r))
+            .collect();
         print_json(&json!({"levels": levels, "count": arr.len(), "records": arr}));
         return;
     }
@@ -227,7 +230,14 @@ fn errors(recs: &[Record], warn: bool, level: Option<&str>, json_out: bool, full
     }
 }
 
-fn grep(recs: &[Record], pattern: &str, ignore_case: bool, limit: usize, json_out: bool, full: bool) {
+fn grep(
+    recs: &[Record],
+    pattern: &str,
+    ignore_case: bool,
+    limit: usize,
+    json_out: bool,
+    full: bool,
+) {
     let rx = match RegexBuilder::new(pattern)
         .case_insensitive(ignore_case)
         .build()
@@ -563,7 +573,13 @@ mod tests {
 
     #[test]
     fn record_json_carries_full_msg_and_stack() {
-        let mut r = rec("svc", "ERROR", "a.b.C", &"m".repeat(400), "2026-06-04T09:00:01Z");
+        let mut r = rec(
+            "svc",
+            "ERROR",
+            "a.b.C",
+            &"m".repeat(400),
+            "2026-06-04T09:00:01Z",
+        );
         r.stack = "s".repeat(800);
         r.trace = "t1".into();
         let with_index = record_json(Some(7), &r);
