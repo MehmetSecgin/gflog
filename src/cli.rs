@@ -10,6 +10,9 @@ pub struct Cli {
     /// emit machine-readable JSON instead of compact text (works on any subcommand/view)
     #[arg(long, global = true)]
     pub json: bool,
+    /// print full untruncated message + stack in text views (errors/grep/trace/patterns/summary)
+    #[arg(long, global = true)]
+    pub full: bool,
     #[command(subcommand)]
     pub source: Source,
 }

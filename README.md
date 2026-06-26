@@ -100,7 +100,10 @@ gflog labels
 ### Views (shared by `file` and `live`)
 `summary` · `errors [--warn|--level A,B]` · `grep PATTERN [-i]` · `trace TRACE_ID` ·
 `show INDEX` · `patterns [--level A,B]` · `timeline [--buckets N]`. Add `--json` to any
-command for machine-readable output.
+command for machine-readable output. Add `--full` to print complete, untruncated
+messages and stack traces in the text views (`errors`/`grep`/`trace`/`patterns`/`summary`)
+— read N full bodies in one command instead of `show`-ing them one at a time. `--json`
+records always carry the complete `msg` and `stack` regardless of `--full`.
 
 ### Scoping
 - `--datasource SUBSTR` — pick a Loki datasource when several exist (cached after first use).

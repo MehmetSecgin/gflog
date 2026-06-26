@@ -707,6 +707,7 @@ pub fn run_live(
     ns: &Ns,
     limit: usize,
     json: bool,
+    full: bool,
     time: &TimeRange,
     conn: &Conn,
     filter: &Filter,
@@ -764,7 +765,7 @@ pub fn run_live(
             recs.len()
         );
     }
-    crate::views::dispatch(&recs, view, json);
+    crate::views::dispatch(&recs, view, json, full);
 }
 
 fn label_set(metric: &Map<String, Value>) -> String {
