@@ -99,6 +99,8 @@ gflog file -f Logs-2026-01-01.json errors --warn
 # live LogQL
 gflog live -q '{service_name="my-service"} |= "error"' --since 30m summary
 gflog metric -q 'sum by (level)(count_over_time({service_name="my-service"} | logfmt [5m]))' --since 3h
+# a TRUE total count needs the [range] to equal --step so windows tile (no overlap):
+gflog metric -q 'sum(count_over_time({service_name="my-service"}[1m]))' --step 1m --since 3h
 gflog values service_name            # discover what exists
 gflog labels
 ```
@@ -118,5 +120,12 @@ records always carry the complete `msg` and `stack` regardless of `--full`.
   `-q` always wins; for a fully custom matcher, write it in `-q` directly.
 - `--since 30m` / `--start` / `--end`, `--limit N`, record filters `--service`/`--logger`/
   `--match`/`--after`/`--before`.
+
+### `metric` range vs `--step`
+`count_over_time({...}[range])` counts events in the trailing `[range]` at each `--step`. If
+`[range]` is larger than `--step`, the windows **overlap** and summing the points over-counts;
+if `--step` is larger than `[range]`, windows leave **gaps** and undercount. For a true total
+over the window, make them equal — e.g. `[1m]` with `--step 1m`. `gflog` warns on a bad
+mismatch. (Compound durations like `2h30m` are parsed correctly for both `[range]` and `--step`.)
 
 Only JSON exports are handled offline; `.txt`/`.csv` are out of scope.

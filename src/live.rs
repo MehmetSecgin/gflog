@@ -134,6 +134,30 @@ fn unit_secs(u: char) -> Option<i64> {
     }
 }
 
+fn parse_compound_secs(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let mut total: i64 = 0;
+    let mut num = String::new();
+    let mut saw_unit = false;
+    for ch in s.chars() {
+        if ch.is_ascii_digit() {
+            num.push(ch);
+        } else {
+            let n: i64 = num.parse().ok()?;
+            total = total.checked_add(n.checked_mul(unit_secs(ch)?)?)?;
+            num.clear();
+            saw_unit = true;
+        }
+    }
+    if !num.is_empty() {
+        return None;
+    }
+    saw_unit.then_some(total)
+}
+
 fn read_cookie_raw() -> Option<String> {
     fs::read_to_string(cookie_file())
         .ok()
@@ -647,11 +671,32 @@ fn iso_from_ns(ts_ns: i64) -> String {
 }
 
 fn duration_secs(s: &str) -> i64 {
-    let s = s.trim();
-    let last = s.chars().last().unwrap_or('h');
-    let secs = unit_secs(last).unwrap_or(3600);
-    let n: i64 = s[..s.len() - last.len_utf8()].parse().unwrap_or(0);
-    n * secs
+    parse_compound_secs(s).unwrap_or(3600)
+}
+
+fn range_window_secs(query: &str) -> Option<i64> {
+    let re = regex::Regex::new(r"\[([0-9]+[smhdw](?:[0-9]+[smhdw])*)\]").unwrap();
+    re.captures(query)
+        .and_then(|c| parse_compound_secs(c.get(1)?.as_str()))
+}
+
+fn range_step_warning(query: &str, step_s: i64) -> Option<String> {
+    let range_s = range_window_secs(query)?;
+    if range_s <= 0 || step_s <= 0 {
+        return None;
+    }
+    if range_s >= step_s * 2 {
+        Some(format!(
+            "warning: the [{range_s}s] range is larger than --step {step_s}s — count_over_time windows overlap, so summing the points over-counts by ~{}x. For a true total over the window, make the range equal --step (e.g. [1m] with --step 1m).",
+            range_s / step_s
+        ))
+    } else if step_s >= range_s * 2 {
+        Some(format!(
+            "warning: --step {step_s}s is larger than the [{range_s}s] range — sampling windows leave gaps between points, so counts will undercount."
+        ))
+    } else {
+        None
+    }
 }
 
 fn window(t: &TimeRange) -> (i64, i64, String) {
@@ -829,6 +874,9 @@ pub fn run_metric(query: &str, ns: &Ns, step: &str, json: bool, time: &TimeRange
     let query = query.as_str();
     let (start_ns, end_ns, win) = window(time);
     let step_s = duration_secs(step).max(1);
+    if let Some(w) = range_step_warning(query, step_s) {
+        eprintln!("{w}");
+    }
     let data = proxy_get(
         id,
         "/loki/api/v1/query_range",
@@ -1124,6 +1172,48 @@ mod tests {
         assert_eq!(fs::read_to_string(&p).unwrap(), "second");
         assert!(!p.with_extension("tmp").exists());
         let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn duration_secs_handles_compound() {
+        // the footgun: previously "2h30m" silently parsed to 1s (only the last unit)
+        assert_eq!(duration_secs("2h30m"), 2 * 3600 + 30 * 60);
+        assert_eq!(duration_secs("1h30m15s"), 3600 + 1800 + 15);
+        assert_eq!(parse_compound_secs("2h30m"), Some(9_000));
+        assert_eq!(parse_compound_secs("1m"), Some(60));
+        assert_eq!(parse_compound_secs("90"), None);
+        assert_eq!(parse_compound_secs("5x"), None);
+        assert_eq!(parse_compound_secs(""), None);
+    }
+
+    #[test]
+    fn range_window_secs_extracts_bracket_duration() {
+        assert_eq!(
+            range_window_secs("sum(count_over_time({a=\"b\"}[2h30m]))"),
+            Some(9_000)
+        );
+        assert_eq!(range_window_secs("rate({a=\"b\"}[5m])"), Some(300));
+        assert_eq!(range_window_secs("{a=\"b\"}"), None);
+    }
+
+    #[test]
+    fn range_step_warning_flags_overlap_and_gaps_but_not_tiling() {
+        // overlap: range >> step inflates summed counts
+        let w = range_step_warning("count_over_time({a=\"b\"}[5m])", 60).unwrap();
+        assert!(w.contains("overlap") && w.contains("~5x"));
+        // gap: step >> range undercounts
+        assert!(
+            range_step_warning("count_over_time({a=\"b\"}[1m])", 600)
+                .unwrap()
+                .contains("undercount")
+        );
+        // tiling: range == step is correct, no warning
+        assert_eq!(
+            range_step_warning("count_over_time({a=\"b\"}[2h30m])", 9_000),
+            None
+        );
+        // no range literal -> nothing to warn about
+        assert_eq!(range_step_warning("{a=\"b\"}", 60), None);
     }
 
     #[test]
