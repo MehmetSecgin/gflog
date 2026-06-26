@@ -16,13 +16,9 @@ pub fn die(msg: &str) -> ! {
 
 fn main() {
     let cli = Cli::parse();
+    let json = cli.json;
     match cli.source {
-        Source::File {
-            file,
-            json,
-            filter,
-            view,
-        } => {
+        Source::File { file, filter, view } => {
             let (recs, name) = if file.as_deref() == Some("-") {
                 (offline::load_stdin(), "stdin".to_string())
             } else {
@@ -49,7 +45,6 @@ fn main() {
         Source::Live {
             query,
             limit,
-            json,
             time,
             conn,
             ns,
@@ -61,23 +56,16 @@ fn main() {
         Source::Metric {
             query,
             step,
-            json,
             time,
             conn,
             ns,
         } => {
             live::run_metric(&query, &ns, &step, json, &time, &conn);
         }
-        Source::Labels {
-            json,
-            time,
-            conn,
-            ns,
-        } => live::run_labels(&ns, json, &time, &conn),
+        Source::Labels { time, conn, ns } => live::run_labels(&ns, json, &time, &conn),
         Source::Values {
             label,
             query,
-            json,
             time,
             conn,
             ns,

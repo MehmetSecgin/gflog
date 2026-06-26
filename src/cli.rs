@@ -7,6 +7,9 @@ use clap::{Args, Parser, Subcommand};
     version
 )]
 pub struct Cli {
+    /// emit machine-readable JSON instead of compact text (works on any subcommand/view)
+    #[arg(long, global = true)]
+    pub json: bool,
     #[command(subcommand)]
     pub source: Source,
 }
@@ -76,9 +79,6 @@ pub enum Source {
         /// export path/glob (default: newest Logs-*/Explore-logs-* in ~/Downloads); '-' reads stdin
         #[arg(short, long)]
         file: Option<String>,
-        /// emit machine-readable JSON instead of compact text
-        #[arg(long, global = true)]
-        json: bool,
         #[command(flatten)]
         filter: Filter,
         #[command(subcommand)]
@@ -92,9 +92,6 @@ pub enum Source {
         /// max log lines pulled from Loki
         #[arg(long, default_value_t = 1000)]
         limit: usize,
-        /// emit machine-readable JSON instead of compact text
-        #[arg(long, global = true)]
-        json: bool,
         #[command(flatten)]
         time: TimeRange,
         #[command(flatten)]
@@ -114,9 +111,6 @@ pub enum Source {
         /// step between data points (range query resolution)
         #[arg(long, default_value = "1m")]
         step: String,
-        /// emit machine-readable JSON instead of compact text
-        #[arg(long, global = true)]
-        json: bool,
         #[command(flatten)]
         time: TimeRange,
         #[command(flatten)]
@@ -126,9 +120,6 @@ pub enum Source {
     },
     /// List the label names present in the time window (discovery)
     Labels {
-        /// emit machine-readable JSON instead of one-per-line
-        #[arg(long, global = true)]
-        json: bool,
         #[command(flatten)]
         time: TimeRange,
         #[command(flatten)]
@@ -143,9 +134,6 @@ pub enum Source {
         /// optional stream selector to scope values, e.g. '{namespace="prod"}'
         #[arg(short, long)]
         query: Option<String>,
-        /// emit machine-readable JSON instead of one-per-line
-        #[arg(long, global = true)]
-        json: bool,
         #[command(flatten)]
         time: TimeRange,
         #[command(flatten)]
@@ -224,4 +212,56 @@ pub enum View {
         #[arg(long, default_value_t = 24)]
         buckets: usize,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn json_of(args: &[&str]) -> bool {
+        Cli::try_parse_from(args).expect("should parse").json
+    }
+
+    #[test]
+    fn json_global_accepted_in_every_position() {
+        // before the subcommand (the previously-broken position)
+        assert!(json_of(&[
+            "gflog",
+            "--json",
+            "live",
+            "-q",
+            "{x=\"y\"}",
+            "grep",
+            "."
+        ]));
+        // after the subcommand
+        assert!(json_of(&[
+            "gflog",
+            "live",
+            "--json",
+            "-q",
+            "{x=\"y\"}",
+            "grep",
+            "."
+        ]));
+        // after the view
+        assert!(json_of(&[
+            "gflog",
+            "live",
+            "-q",
+            "{x=\"y\"}",
+            "grep",
+            ".",
+            "--json"
+        ]));
+        // metric / file / discovery
+        assert!(json_of(&["gflog", "--json", "metric", "-q", "{x=\"y\"}"]));
+        assert!(json_of(&["gflog", "--json", "file", "summary"]));
+        assert!(json_of(&["gflog", "--json", "labels"]));
+    }
+
+    #[test]
+    fn json_defaults_off() {
+        assert!(!json_of(&["gflog", "live", "-q", "{x=\"y\"}", "grep", "."]));
+    }
 }
