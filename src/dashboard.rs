@@ -247,7 +247,7 @@ fn parse_base() -> Url {
 
 fn grafana_url(base: &Url, path: &str) -> Url {
     Url::parse(&format!("{}{}", base.as_str().trim_end_matches('/'), path))
-        .expect("Grafana API path must form a valid URL")
+        .unwrap_or_else(|e| crate::die(&format!("invalid Grafana API URL: {e}")))
 }
 
 fn grafana_path<'a>(url: &'a Url, base: &Url) -> Option<&'a str> {
@@ -556,8 +556,11 @@ fn resolve_variables(
     }
     values.extend([
         ("__interval".into(), format!("{step_seconds}s")),
+        ("__interval_ms".into(), (step_seconds * 1000).to_string()),
         ("__rate_interval".into(), format!("{step_seconds}s")),
         ("__range".into(), format!("{range_seconds}s")),
+        ("__range_s".into(), range_seconds.to_string()),
+        ("__range_ms".into(), (range_seconds * 1000).to_string()),
         ("__all".into(), ".*".into()),
     ]);
     Ok(values)
@@ -1094,6 +1097,11 @@ mod tests {
         assert_eq!(
             interpolate(query, &vars).unwrap(),
             "rate(requests_total[30s]) and 30s and 3600s and .*"
+        );
+        let scaled = "$__interval_ms / $__range_s / $__range_ms";
+        assert_eq!(
+            interpolate(scaled, &vars).unwrap(),
+            "30000 / 3600 / 3600000"
         );
     }
 

@@ -119,8 +119,11 @@ gflog refuses a cross-origin redirect before forwarding its token or cookie.
 Select a panel with `--panel ID`, `--panel panel-ID`, or its exact title. Without an override,
 `viewPanel` wins; a dashboard with exactly one queryable panel selects it automatically.
 Dashboard variables resolve in this order: repeated `--var NAME=VALUE`, URL `var-NAME`, then
-the dashboard's current/selected value. v1 supports `$Name` and `${Name}` interpolation only
-and reports unresolved or formatted expressions such as `${Name:regex}` explicitly.
+the dashboard's current/selected value. Grafana's built-in `$__interval`, `$__rate_interval`,
+`$__range` (and their `_ms`/`_s` variants) derive from the resolved query range — `$__rate_interval`
+is approximated as the step — and an `All`-selected variable expands to `.*`. v1 supports `$Name`
+and `${Name}` interpolation and reports unresolved or formatted expressions such as `${Name:regex}`
+explicitly.
 
 Dashboard queries support Prometheus datasources only and run the panel expression unchanged
 through Grafana's datasource proxy. `--query` prints the resolved datasource and PromQL without
