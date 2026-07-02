@@ -3,7 +3,8 @@ use crate::record::normalize;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, RequestBuilder};
-use reqwest::header::SET_COOKIE;
+use reqwest::header::{LOCATION, SET_COOKIE};
+use reqwest::redirect::Policy;
 use serde_json::{Map, Value};
 use std::fs;
 use std::io::Read;
@@ -14,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
                   (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-fn base() -> String {
+pub(crate) fn base() -> String {
     let raw = std::env::var("GRAFANA_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -134,7 +135,7 @@ fn unit_secs(u: char) -> Option<i64> {
     }
 }
 
-fn parse_compound_secs(s: &str) -> Option<i64> {
+pub(crate) fn parse_compound_secs(s: &str) -> Option<i64> {
     let s = s.trim();
     if s.is_empty() {
         return None;
@@ -178,6 +179,7 @@ fn cookie_header() -> String {
 fn client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(30))
+        .redirect(Policy::none())
         .build()
         .unwrap_or_else(|e| crate::die(&format!("http client init failed: {e}")))
 }
@@ -242,6 +244,59 @@ fn http_get(url: &str, params: &[(&str, &str)]) -> (StatusCode, Vec<String>, Str
     let cookies = collect_set_cookies(&resp);
     let body = resp.text().unwrap_or_default();
     (status, cookies, body)
+}
+
+pub(crate) struct GetResponse {
+    pub status: StatusCode,
+    pub location: Option<String>,
+    pub body: String,
+}
+
+pub(crate) fn authenticated_get(url: &str, params: &[(&str, &str)]) -> GetResponse {
+    let resp = match with_headers(client().get(url).query(params)).send() {
+        Ok(r) => r,
+        Err(e) => crate::die(&format!("cannot reach {}: {e}", base())),
+    };
+    let status = resp.status();
+    let location = resp
+        .headers()
+        .get(LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let cookies = collect_set_cookies(&resp);
+    let body = resp.text().unwrap_or_default();
+    if status.is_success() || status.is_redirection() {
+        save_rotated(&cookies);
+    }
+    GetResponse {
+        status,
+        location,
+        body,
+    }
+}
+
+pub(crate) fn authenticated_json(url: &str, params: &[(&str, &str)]) -> Value {
+    let first = authenticated_get(url, params);
+    if first.status.is_success() {
+        return serde_json::from_str(&first.body)
+            .unwrap_or_else(|e| crate::die(&format!("invalid JSON from Grafana: {e}")));
+    }
+    if is_auth_err(first.status) {
+        if token_value().is_none() && rotate(false) {
+            let retry = authenticated_get(url, params);
+            if retry.status.is_success() {
+                return serde_json::from_str(&retry.body)
+                    .unwrap_or_else(|e| crate::die(&format!("invalid JSON from Grafana: {e}")));
+            }
+            auth_die(retry.status, &retry.body);
+        }
+        auth_die(first.status, &first.body);
+    }
+    crate::die(&format!(
+        "HTTP {} from Grafana\n{}",
+        first.status.as_u16(),
+        clip(&first.body, 300)
+    ));
 }
 
 fn is_auth_err(status: StatusCode) -> bool {

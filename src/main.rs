@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 mod cli;
+mod dashboard;
 mod live;
 mod offline;
 mod record;
@@ -19,6 +20,28 @@ fn main() {
     let json = cli.json;
     let full = cli.full;
     match cli.source {
+        Source::Dashboard {
+            url,
+            panel,
+            since,
+            start,
+            end,
+            step,
+            vars,
+            query,
+            conn,
+        } => dashboard::run(
+            &url,
+            panel.as_deref(),
+            since.as_deref(),
+            start.as_deref(),
+            end.as_deref(),
+            step.as_deref(),
+            &vars,
+            query,
+            json,
+            &conn,
+        ),
         Source::File { file, filter, view } => {
             let (recs, name) = if file.as_deref() == Some("-") {
                 (offline::load_stdin(), "stdin".to_string())

@@ -3,7 +3,7 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "gflog",
-    about = "Parse Grafana/Loki logs — offline JSON exports and live LogQL queries",
+    about = "Query Grafana dashboards and parse Grafana/Loki logs",
     version
 )]
 pub struct Cli {
@@ -27,6 +27,13 @@ pub struct Conn {
     pub refresh_datasource: bool,
     /// skip the session-cookie keepalive rotation before querying (rotation is on by
     /// default; ignored when a Bearer token is in use)
+    #[arg(long, global = true)]
+    pub no_rotate: bool,
+}
+
+#[derive(Args)]
+pub struct DashboardConn {
+    /// skip session-cookie keepalive rotation before querying
     #[arg(long, global = true)]
     pub no_rotate: bool,
 }
@@ -77,6 +84,34 @@ pub struct TimeRange {
 
 #[derive(Subcommand)]
 pub enum Source {
+    /// Resolve and query a Grafana dashboard panel backed by Prometheus
+    Dashboard {
+        /// Grafana /goto/... or /d/<uid>/<slug> URL (absolute or relative to GRAFANA_URL)
+        url: String,
+        /// override the panel selected by viewPanel (ID, panel-ID, or exact title)
+        #[arg(long)]
+        panel: Option<String>,
+        /// lookback window (30m, 2h, 2d); overrides URL time range
+        #[arg(long, conflicts_with = "start")]
+        since: Option<String>,
+        /// absolute range start; overrides URL time range
+        #[arg(long)]
+        start: Option<String>,
+        /// absolute range end; default now
+        #[arg(long)]
+        end: Option<String>,
+        /// Prometheus range-query step; derived from the range when omitted
+        #[arg(long)]
+        step: Option<String>,
+        /// override a dashboard variable (NAME=VALUE); repeatable
+        #[arg(long = "var", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
+        /// print the resolved datasource and queries without executing them
+        #[arg(long)]
+        query: bool,
+        #[command(flatten)]
+        conn: DashboardConn,
+    },
     /// Parse a downloaded Grafana/Loki JSON export
     File {
         /// export path/glob (default: newest Logs-*/Explore-logs-* in ~/Downloads); '-' reads stdin
@@ -266,5 +301,50 @@ mod tests {
     #[test]
     fn json_defaults_off() {
         assert!(!json_of(&["gflog", "live", "-q", "{x=\"y\"}", "grep", "."]));
+    }
+
+    #[test]
+    fn dashboard_flags_parse_and_json_is_global() {
+        let cli = Cli::try_parse_from([
+            "gflog",
+            "dashboard",
+            "/d/uid/slug?viewPanel=panel-21",
+            "--panel",
+            "Latency",
+            "--since",
+            "2d",
+            "--step",
+            "5m",
+            "--var",
+            "Namespace=production",
+            "--var",
+            "services=example-service",
+            "--query",
+            "--json",
+            "--no-rotate",
+        ])
+        .unwrap();
+        assert!(cli.json);
+        let Source::Dashboard { vars, query, .. } = cli.source else {
+            panic!("expected dashboard")
+        };
+        assert_eq!(vars, ["Namespace=production", "services=example-service"]);
+        assert!(query);
+    }
+
+    #[test]
+    fn dashboard_start_conflicts_with_since() {
+        assert!(
+            Cli::try_parse_from([
+                "gflog",
+                "dashboard",
+                "/d/u/s",
+                "--start",
+                "2026-01-01",
+                "--since",
+                "1h"
+            ])
+            .is_err()
+        );
     }
 }
