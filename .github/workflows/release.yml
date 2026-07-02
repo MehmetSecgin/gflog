@@ -38,12 +38,27 @@ jobs:
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - name: stamp version
         shell: bash
+        env:
+          NEXT: ${{ steps.v.outputs.next }}
         run: |
           set -euo pipefail
-          sed -i '' -E "0,/^version = \"[^\"]+\"/s//version = \"${{ steps.v.outputs.next }}\"/" Cargo.toml
-          cargo update -p gflog --precise "${{ steps.v.outputs.next }}"
+          perl -i -pe 'if (!$seen && s/^version = "[^"]+"/version = "$ENV{NEXT}"/) { $seen = 1 }' Cargo.toml
+          grep -q "^version = \"$NEXT\"$" Cargo.toml || { echo "version stamp did not apply"; exit 1; }
+          cargo update -p gflog --precise "$NEXT"
       - name: build
         run: cargo build --release --locked
+      - name: commit version bump
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "no version changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "release ${{ steps.v.outputs.tag }} [skip ci]"
+          git push origin HEAD:main
       - name: package
         run: |
           asset="gflog-${{ steps.v.outputs.tag }}-aarch64-apple-darwin.tar.gz"
@@ -56,6 +71,6 @@ jobs:
         run: |
           gh release create "${{ steps.v.outputs.tag }}" \
             "$ASSET" "$ASSET.sha256" \
-            --target "$GITHUB_SHA" \
+            --target "$(git rev-parse HEAD)" \
             --title "${{ steps.v.outputs.tag }}" \
             --generate-notes
