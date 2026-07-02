@@ -3,7 +3,8 @@ use crate::record::normalize;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use reqwest::StatusCode;
 use reqwest::blocking::{Client, RequestBuilder};
-use reqwest::header::SET_COOKIE;
+use reqwest::header::{LOCATION, SET_COOKIE};
+use reqwest::redirect::Policy;
 use serde_json::{Map, Value};
 use std::fs;
 use std::io::Read;
@@ -14,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
                   (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-fn base() -> String {
+pub(crate) fn base() -> String {
     let raw = std::env::var("GRAFANA_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -134,7 +135,7 @@ fn unit_secs(u: char) -> Option<i64> {
     }
 }
 
-fn parse_compound_secs(s: &str) -> Option<i64> {
+pub(crate) fn parse_compound_secs(s: &str) -> Option<i64> {
     let s = s.trim();
     if s.is_empty() {
         return None;
@@ -182,13 +183,30 @@ fn client() -> Client {
         .unwrap_or_else(|e| crate::die(&format!("http client init failed: {e}")))
 }
 
-fn with_headers(rb: RequestBuilder) -> RequestBuilder {
+fn no_redirect_client() -> Client {
+    Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(Policy::none())
+        .build()
+        .unwrap_or_else(|e| crate::die(&format!("http client init failed: {e}")))
+}
+
+fn with_headers(rb: RequestBuilder, org_id: Option<&str>) -> RequestBuilder {
     let rb = match resolve_auth() {
         Auth::Bearer(t) => rb.header("Authorization", format!("Bearer {t}")),
         Auth::Cookie(c) => rb.header("Cookie", c),
     };
-    rb.header("Accept", "application/json")
-        .header("User-Agent", UA)
+    let rb = rb
+        .header("Accept", "application/json")
+        .header("User-Agent", UA);
+    with_org_header(rb, org_id)
+}
+
+fn with_org_header(rb: RequestBuilder, org_id: Option<&str>) -> RequestBuilder {
+    match org_id {
+        Some(org_id) => rb.header("X-Grafana-Org-Id", org_id),
+        None => rb,
+    }
 }
 
 fn save_rotated(set_cookies: &[String]) {
@@ -234,7 +252,7 @@ fn collect_set_cookies(resp: &reqwest::blocking::Response) -> Vec<String> {
 }
 
 fn http_get(url: &str, params: &[(&str, &str)]) -> (StatusCode, Vec<String>, String) {
-    let resp = match with_headers(client().get(url).query(params)).send() {
+    let resp = match with_headers(client().get(url).query(params), None).send() {
         Ok(r) => r,
         Err(e) => crate::die(&format!("cannot reach {}: {e}", base())),
     };
@@ -242,6 +260,72 @@ fn http_get(url: &str, params: &[(&str, &str)]) -> (StatusCode, Vec<String>, Str
     let cookies = collect_set_cookies(&resp);
     let body = resp.text().unwrap_or_default();
     (status, cookies, body)
+}
+
+pub(crate) struct GetResponse {
+    pub status: StatusCode,
+    pub location: Option<String>,
+    pub body: String,
+}
+
+pub(crate) fn authenticated_get_no_redirect(url: &str, params: &[(&str, &str)]) -> GetResponse {
+    authenticated_get_with(no_redirect_client(), url, params, None)
+}
+
+fn authenticated_get_with(
+    client: Client,
+    url: &str,
+    params: &[(&str, &str)],
+    org_id: Option<&str>,
+) -> GetResponse {
+    let resp = match with_headers(client.get(url).query(params), org_id).send() {
+        Ok(r) => r,
+        Err(e) => crate::die(&format!("cannot reach {}: {e}", base())),
+    };
+    let status = resp.status();
+    let location = resp
+        .headers()
+        .get(LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let cookies = collect_set_cookies(&resp);
+    let body = resp.text().unwrap_or_default();
+    if status.is_success() || status.is_redirection() {
+        save_rotated(&cookies);
+    }
+    GetResponse {
+        status,
+        location,
+        body,
+    }
+}
+
+pub(crate) fn authenticated_json_for_org(
+    url: &str,
+    params: &[(&str, &str)],
+    org_id: Option<&str>,
+) -> Value {
+    let first = authenticated_get_with(client(), url, params, org_id);
+    if first.status.is_success() {
+        return serde_json::from_str(&first.body)
+            .unwrap_or_else(|e| crate::die(&format!("invalid JSON from Grafana: {e}")));
+    }
+    if is_auth_err(first.status) {
+        if token_value().is_none() && rotate(false) {
+            let retry = authenticated_get_with(client(), url, params, org_id);
+            if retry.status.is_success() {
+                return serde_json::from_str(&retry.body)
+                    .unwrap_or_else(|e| crate::die(&format!("invalid JSON from Grafana: {e}")));
+            }
+            auth_die(retry.status, &retry.body);
+        }
+        auth_die(first.status, &first.body);
+    }
+    crate::die(&format!(
+        "HTTP {} from Grafana\n{}",
+        first.status.as_u16(),
+        clip(&first.body, 300)
+    ));
 }
 
 fn is_auth_err(status: StatusCode) -> bool {
@@ -386,7 +470,7 @@ fn read_clipboard() -> String {
 
 fn report_auth() -> bool {
     let url = format!("{}/api/datasources", base());
-    let resp = match with_headers(client().get(&url)).send() {
+    let resp = match with_headers(client().get(&url), None).send() {
         Ok(r) => r,
         Err(e) => crate::die(&format!("cannot reach {}: {e}", base())),
     };
@@ -1315,5 +1399,16 @@ mod tests {
         m.insert("a".into(), Value::String("1".into()));
         assert_eq!(label_set(&m), r#"{a="1", b="2"}"#);
         assert_eq!(label_set(&Map::new()), "{}");
+    }
+
+    #[test]
+    fn adds_grafana_org_header_when_requested() {
+        let request = with_org_header(
+            Client::new().get("https://grafana.example.com/api/dashboards/uid/test"),
+            Some("42"),
+        )
+        .build()
+        .unwrap();
+        assert_eq!(request.headers()["X-Grafana-Org-Id"], "42");
     }
 }

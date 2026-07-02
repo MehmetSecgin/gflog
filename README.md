@@ -2,8 +2,8 @@
 
 [![CI](https://github.com/MehmetSecgin/gflog/actions/workflows/ci.yml/badge.svg)](https://github.com/MehmetSecgin/gflog/actions/workflows/ci.yml)
 
-A small CLI for reading Grafana/Loki logs from the terminal — both **downloaded JSON
-exports** and **live LogQL queries** — without drowning in raw log lines. It normalizes
+A small CLI for querying Grafana dashboards and reading Grafana/Loki logs from the terminal —
+both **downloaded JSON exports** and **live LogQL queries** — without drowning in raw log lines. It normalizes
 records to `ts, level, service, pod, namespace, logger, thread, trace, msg, stack` and gives
 you compact, composable views: summaries, error lists, pattern clustering, timelines, traces.
 
@@ -103,7 +103,35 @@ gflog metric -q 'sum by (level)(count_over_time({service_name="my-service"} | lo
 gflog metric -q 'sum(count_over_time({service_name="my-service"}[1m]))' --step 1m --since 3h
 gflog values service_name            # discover what exists
 gflog labels
+
+# resolve a dashboard panel and execute its PromQL through Grafana
+gflog dashboard 'https://grafana.example.com/goto/abc123?orgId=1' --since 2d
+gflog dashboard '/d/exampleUid/service-stats?viewPanel=panel-21' \
+  --var Namespace=production --var services=example-service --query
 ```
+
+### Dashboard panel queries
+
+`dashboard` accepts same-origin Grafana `/goto/...` links and direct `/d/<uid>/<slug>` URLs,
+including paths relative to the configured Grafana URL. Redirects are followed manually;
+gflog refuses a cross-origin redirect before forwarding its token or cookie.
+
+Select a panel with `--panel ID`, `--panel panel-ID`, or its exact title. Without an override,
+`viewPanel` wins; a dashboard with exactly one queryable panel selects it automatically.
+Dashboard variables resolve in this order: repeated `--var NAME=VALUE`, URL `var-NAME`, then
+the dashboard's current/selected value. Grafana's built-in `$__interval`, `$__rate_interval`,
+`$__range` (and their `_ms`/`_s` variants) derive from the resolved query range — `$__rate_interval`
+is approximated as the step — and an `All`-selected variable expands to `.*`. v1 supports `$Name`
+and `${Name}` interpolation and reports unresolved or formatted expressions such as `${Name:regex}`
+explicitly.
+
+Dashboard queries support Prometheus datasources only and run the panel expression unchanged
+through Grafana's datasource proxy. `--query` prints the resolved datasource and PromQL without
+execution. `--since`, `--start`, `--end`, and `--step` control the range; without `--step`, gflog
+targets roughly 500 samples and clamps the derived step to 1 second–1 hour. `--json` returns
+deterministic per-series summaries and deliberately omits raw points.
+
+`gflog metric` remains a Loki metric LogQL command; it is not generic Prometheus support.
 
 ### Views (shared by `file` and `live`)
 `summary` · `errors [--warn|--level A,B]` · `grep PATTERN [-i]` · `trace TRACE_ID` ·
