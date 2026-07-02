@@ -120,15 +120,17 @@ pub fn run(
     let base = parse_base();
     let reference =
         resolve_reference(raw_url, &base, conn.no_rotate).unwrap_or_else(|e| crate::die(&e));
-    let dashboard_url = base
-        .join(&format!("/api/dashboards/uid/{}", reference.uid))
-        .unwrap();
+    let dashboard_url = grafana_url(&base, &format!("/api/dashboards/uid/{}", reference.uid));
     let org_params = reference
         .org_id
         .as_deref()
         .map(|org| vec![("orgId", org)])
         .unwrap_or_default();
-    let envelope = crate::live::authenticated_json(dashboard_url.as_str(), &org_params);
+    let envelope = crate::live::authenticated_json_for_org(
+        dashboard_url.as_str(),
+        &org_params,
+        reference.org_id.as_deref(),
+    );
     let dashboard = envelope
         .get("dashboard")
         .unwrap_or_else(|| crate::die("Grafana dashboard response has no dashboard object"));
@@ -139,16 +141,33 @@ pub fn run(
     let panels = collect_panels(dashboard);
     let panel = select_panel(&panels, panel_override, reference.panel_id)
         .unwrap_or_else(|e| crate::die(&e));
-    let variables = resolve_variables(dashboard, &reference.variables, cli_vars)
-        .unwrap_or_else(|e| crate::die(&e));
+    let (start_s, end_s, step_s) = resolve_range(
+        since,
+        start,
+        end,
+        reference.from.as_deref(),
+        reference.to.as_deref(),
+        step,
+    )
+    .unwrap_or_else(|e| crate::die(&e));
+    let variables = resolve_variables(
+        dashboard,
+        &reference.variables,
+        cli_vars,
+        step_s,
+        end_s - start_s,
+    )
+    .unwrap_or_else(|e| crate::die(&e));
     let panel_ds =
         datasource_parts(&panel.datasource, &variables).unwrap_or_else(|e| crate::die(&e));
     let targets = resolve_targets(&panel, &panel_ds, &variables).unwrap_or_else(|e| crate::die(&e));
 
-    let ds_url = base
-        .join(&format!("/api/datasources/uid/{}", panel_ds.0))
-        .unwrap();
-    let ds = crate::live::authenticated_json(ds_url.as_str(), &org_params);
+    let ds_url = grafana_url(&base, &format!("/api/datasources/uid/{}", panel_ds.0));
+    let ds = crate::live::authenticated_json_for_org(
+        ds_url.as_str(),
+        &org_params,
+        reference.org_id.as_deref(),
+    );
     let ds_kind = string_at(&ds, "type").unwrap_or("").to_string();
     if !ds_kind.eq_ignore_ascii_case("prometheus") {
         crate::die(&format!(
@@ -161,16 +180,6 @@ pub fn run(
         name: string_at(&ds, "name").unwrap_or("(unnamed)").to_string(),
         kind: ds_kind,
     };
-    let (start_s, end_s, step_s) = resolve_range(
-        since,
-        start,
-        end,
-        reference.from.as_deref(),
-        reference.to.as_deref(),
-        step,
-    )
-    .unwrap_or_else(|e| crate::die(&e));
-
     let mut target_outputs = Vec::new();
     for target in targets {
         let series = if query_only {
@@ -236,6 +245,22 @@ fn parse_base() -> Url {
         .unwrap_or_else(|e| crate::die(&format!("invalid Grafana URL: {e}")))
 }
 
+fn grafana_url(base: &Url, path: &str) -> Url {
+    Url::parse(&format!("{}{}", base.as_str().trim_end_matches('/'), path))
+        .expect("Grafana API path must form a valid URL")
+}
+
+fn grafana_path<'a>(url: &'a Url, base: &Url) -> Option<&'a str> {
+    let base_path = base.path().trim_end_matches('/');
+    let path = url.path();
+    if base_path.is_empty() {
+        Some(path)
+    } else {
+        path.strip_prefix(base_path)
+            .filter(|relative| relative.is_empty() || relative.starts_with('/'))
+    }
+}
+
 fn authority(url: &Url) -> String {
     match url.port() {
         Some(port) => format!("{}:{port}", url.host_str().unwrap_or("")),
@@ -251,7 +276,7 @@ fn same_origin(a: &Url, b: &Url) -> bool {
 
 fn resolve_reference(raw: &str, base: &Url, no_rotate: bool) -> Result<DashboardRef, String> {
     resolve_reference_with(raw, base, no_rotate, |url| {
-        crate::live::authenticated_get(url, &[])
+        crate::live::authenticated_get_no_redirect(url, &[])
     })
 }
 
@@ -270,7 +295,7 @@ fn resolve_reference_with(
     if !same_origin(&url, base) {
         return Err("dashboard URL must use the configured Grafana origin".into());
     }
-    if url.path().starts_with("/goto/") {
+    if grafana_path(&url, base).is_some_and(|path| path.starts_with("/goto/")) {
         let mut seen = HashSet::new();
         for _ in 0..MAX_REDIRECTS {
             if !seen.insert(url.to_string()) {
@@ -307,10 +332,10 @@ fn resolve_reference_with(
                 );
             }
             url = next;
-            if url.path().starts_with("/d/") {
+            if grafana_path(&url, base).is_some_and(|path| path.starts_with("/d/")) {
                 break;
             }
-            if url.path().starts_with("/login") {
+            if grafana_path(&url, base).is_some_and(|path| path.starts_with("/login")) {
                 return Err("Grafana redirect ended at /login; refresh credentials".into());
             }
         }
@@ -322,13 +347,14 @@ fn parse_dashboard_url(url: Url, base: &Url) -> Result<DashboardRef, String> {
     if !same_origin(&url, base) {
         return Err("dashboard URL must use the configured Grafana origin".into());
     }
-    if url.path().starts_with("/login") {
+    let path = grafana_path(&url, base)
+        .ok_or("dashboard URL is outside the configured Grafana subpath")?;
+    if path.starts_with("/login") {
         return Err("Grafana URL resolved to /login; refresh credentials".into());
     }
-    let parts: Vec<String> = url
-        .path_segments()
-        .into_iter()
-        .flatten()
+    let parts: Vec<String> = path
+        .trim_start_matches('/')
+        .split('/')
         .map(str::to_string)
         .collect();
     if parts.len() < 3 || parts[0] != "d" || parts[1].is_empty() {
@@ -487,6 +513,8 @@ fn resolve_variables(
     dashboard: &Value,
     url: &BTreeMap<String, String>,
     cli: &[String],
+    step_seconds: i64,
+    range_seconds: i64,
 ) -> Result<BTreeMap<String, String>, String> {
     let mut values = BTreeMap::new();
     if let Some(vars) = dashboard
@@ -526,6 +554,12 @@ fn resolve_variables(
         }
         values.insert(name.to_string(), value.to_string());
     }
+    values.extend([
+        ("__interval".into(), format!("{step_seconds}s")),
+        ("__rate_interval".into(), format!("{step_seconds}s")),
+        ("__range".into(), format!("{range_seconds}s")),
+        ("__all".into(), ".*".into()),
+    ]);
     Ok(values)
 }
 
@@ -742,11 +776,10 @@ fn query_prometheus(
     step: i64,
     org_id: Option<&str>,
 ) -> Result<Vec<Series>, String> {
-    let url = base
-        .join(&format!(
-            "/api/datasources/proxy/uid/{uid}/api/v1/query_range"
-        ))
-        .map_err(|e| e.to_string())?;
+    let url = grafana_url(
+        base,
+        &format!("/api/datasources/proxy/uid/{uid}/api/v1/query_range"),
+    );
     let start = start.to_string();
     let end = end.to_string();
     let step = format!("{step}s");
@@ -759,7 +792,7 @@ fn query_prometheus(
     if let Some(org_id) = org_id {
         params.push(("orgId", org_id));
     }
-    let value = crate::live::authenticated_json(url.as_str(), &params);
+    let value = crate::live::authenticated_json_for_org(url.as_str(), &params, org_id);
     parse_prometheus(&value)
 }
 
@@ -1044,9 +1077,53 @@ mod tests {
             {"name":"services","options":[{"selected":true,"value":["a","b"]}]}
         ]}});
         let url = BTreeMap::from([("Namespace".into(), "staging".into())]);
-        let vars = resolve_variables(&dashboard, &url, &["Namespace=production".into()]).unwrap();
+        let vars = resolve_variables(&dashboard, &url, &["Namespace=production".into()], 30, 3600)
+            .unwrap();
         assert_eq!(vars["Namespace"], "production");
         assert_eq!(vars["services"], "a|b");
+    }
+
+    #[test]
+    fn resolves_grafana_builtins_and_all_values() {
+        let dashboard = json!({"templating":{"list":[
+            {"name":"services","current":{"value":"$__all"}}
+        ]}});
+        let vars = resolve_variables(&dashboard, &BTreeMap::new(), &[], 30, 3600).unwrap();
+        let query =
+            "rate(requests_total[$__rate_interval]) and $__interval and $__range and $services";
+        assert_eq!(
+            interpolate(query, &vars).unwrap(),
+            "rate(requests_total[30s]) and 30s and 3600s and .*"
+        );
+    }
+
+    #[test]
+    fn preserves_grafana_subpath_in_api_and_dashboard_urls() {
+        let base = Url::parse("https://grafana.example.com/grafana").unwrap();
+        assert_eq!(
+            grafana_url(&base, "/api/dashboards/uid/abc").as_str(),
+            "https://grafana.example.com/grafana/api/dashboards/uid/abc"
+        );
+        let reference = parse_dashboard_url(
+            Url::parse("https://grafana.example.com/grafana/d/abc/stats").unwrap(),
+            &base,
+        )
+        .unwrap();
+        assert_eq!(reference.uid, "abc");
+    }
+
+    #[test]
+    fn follows_subpath_goto_redirect() {
+        let base = Url::parse("https://grafana.example.com/grafana").unwrap();
+        let reference = resolve_reference_with("/grafana/goto/key", &base, true, |_| {
+            crate::live::GetResponse {
+                status: reqwest::StatusCode::FOUND,
+                location: Some("/grafana/d/uid/slug".into()),
+                body: String::new(),
+            }
+        })
+        .unwrap();
+        assert_eq!(reference.uid, "uid");
     }
 
     #[test]
