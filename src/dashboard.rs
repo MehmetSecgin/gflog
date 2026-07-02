@@ -1010,7 +1010,10 @@ mod tests {
     #[test]
     fn interpolates_without_changing_promql() {
         let values = BTreeMap::from([
-            ("services".into(), "example-service|background-worker".into()),
+            (
+                "services".into(),
+                "example-service|background-worker".into(),
+            ),
             ("Namespace".into(), "production".into()),
         ]);
         let q = "max(metric{module=~\"$services\",quantile=\"1.0\",namespace=~\"${Namespace}\"}) by (method) > 0";
